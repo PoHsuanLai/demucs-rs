@@ -1,0 +1,10 @@
+id = "dawai.demucs"
+name = "Demucs Source Separation"
+version = "0.1.0"
+description = "Split audio into stems (drums, bass, vocals, other) using Meta's HTDemucs model"
+author = "DAWAI"
+extension_type = "wasm"
+main = "extension.wasm"
+
+[tags]
+tags = ["ai", "audio", "stems"]
