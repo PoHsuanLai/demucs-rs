@@ -128,11 +128,37 @@ impl Guest for DemucsExtension {
         let icon_svg = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>"#;
         let _ = dawai::extension::panel_ui::register_panel(
             "dawai.demucs",
-            "Demucs",
+            "Demucs Source Separation",
             icon_svg,
-            300.0,
+            320.0,
             400.0,
         );
+
+        // Set initial panel UI
+        let ui_json = serde_json::json!({
+            "Vertical": {
+                "children": [
+                    { "Label": { "text": "Demucs Source Separation", "bold": true } },
+                    { "Label": { "text": "Split audio into individual stems using AI." } },
+                    { "Separator": null },
+                    { "Label": { "text": "1. Load a model, then drop audio to separate." } },
+                    { "Button": { "id": "load_model", "label": "Load Model", "enabled": true } },
+                    { "Separator": null },
+                    { "Label": { "text": "Stems:" } },
+                    { "Checkbox": { "id": "stem_drums", "label": "Drums", "checked": true } },
+                    { "Checkbox": { "id": "stem_bass", "label": "Bass", "checked": true } },
+                    { "Checkbox": { "id": "stem_vocals", "label": "Vocals", "checked": true } },
+                    { "Checkbox": { "id": "stem_other", "label": "Other", "checked": true } },
+                    { "Separator": null },
+                    { "Button": { "id": "separate", "label": "Separate Stems", "enabled": false } }
+                ]
+            }
+        });
+        let _ = dawai::extension::panel_ui::set_panel_ui(
+            "dawai.demucs",
+            &ui_json.to_string(),
+        );
+
         Ok("demucs extension activated".into())
     }
 
