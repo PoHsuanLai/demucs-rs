@@ -1,5 +1,5 @@
 wit_bindgen::generate!({
-    world: "dawai-extension",
+    world: "dawai-audio-extension",
     path: "wit/world.wit",
 });
 
@@ -10,6 +10,8 @@ use demucs_core::listener::{ForwardEvent, ForwardListener};
 use demucs_core::{Demucs, ModelOptions};
 
 use exports::dawai::extension::extension::Guest;
+use exports::dawai::extension::audio_extension::Guest as AudioGuest;
+use dawai::extension::audio::{AudioBuffer, SeparationResult, Stem, StemId};
 
 type B = NdArray;
 
@@ -85,71 +87,6 @@ impl ForwardListener for ProgressReporter {
     }
 }
 
-#[derive(serde::Deserialize)]
-struct SeparateArgs {
-    left: Vec<f32>,
-    right: Vec<f32>,
-    sample_rate: u32,
-}
-
-#[derive(serde::Serialize)]
-struct StemOutput {
-    id: String,
-    left: Vec<f32>,
-    right: Vec<f32>,
-}
-
-#[derive(serde::Serialize)]
-struct SeparateResult {
-    stems: Vec<StemOutput>,
-    sample_rate: u32,
-}
-
-fn do_separate(args: &str) -> Result<String, String> {
-    let args: SeparateArgs =
-        serde_json::from_str(args).map_err(|e| format!("Invalid args: {e}"))?;
-
-    MODEL.with(|cell| {
-        let model_ref = cell.borrow();
-        let model = model_ref
-            .as_ref()
-            .ok_or("Model not loaded. Call demucs.load first.")?;
-
-        let mut reporter = ProgressReporter::new();
-        reporter.start("Separating stems...");
-
-        // Run inference (blocking — ndarray backend is synchronous)
-        let stems_result = pollster::block_on(model.separate_with_listener(
-            &args.left,
-            &args.right,
-            args.sample_rate,
-            &mut reporter,
-        ));
-
-        match stems_result {
-            Ok(stems) => {
-                reporter.finish("Stem separation complete");
-                let result = SeparateResult {
-                    stems: stems
-                        .into_iter()
-                        .map(|s| StemOutput {
-                            id: s.id.as_str().to_string(),
-                            left: s.left,
-                            right: s.right,
-                        })
-                        .collect(),
-                    sample_rate: args.sample_rate,
-                };
-                serde_json::to_string(&result).map_err(|e| format!("Serialize error: {e}"))
-            }
-            Err(e) => {
-                reporter.fail_progress(&format!("Separation failed: {e}"));
-                Err(format!("Separation failed: {e}"))
-            }
-        }
-    })
-}
-
 fn do_load(_args: &str) -> Result<String, String> {
     let bytes = dawai::extension::storage::get("model_bytes")
         .map_err(|e| format!("Failed to get model bytes: {e}"))?;
@@ -169,6 +106,18 @@ fn do_load(_args: &str) -> Result<String, String> {
     Ok("Model loaded".into())
 }
 
+fn map_stem_id(id: demucs_core::model::metadata::StemId) -> StemId {
+    match id {
+        demucs_core::model::metadata::StemId::Drums => StemId::Drums,
+        demucs_core::model::metadata::StemId::Bass => StemId::Bass,
+        demucs_core::model::metadata::StemId::Other => StemId::Other,
+        demucs_core::model::metadata::StemId::Vocals => StemId::Vocals,
+        demucs_core::model::metadata::StemId::Guitar => StemId::Guitar,
+        demucs_core::model::metadata::StemId::Piano => StemId::Piano,
+    }
+}
+
+// Base extension interface
 impl Guest for DemucsExtension {
     fn init() -> Result<String, String> {
         Ok("demucs extension initialized".into())
@@ -188,13 +137,60 @@ impl Guest for DemucsExtension {
     fn execute_command(command_id: String, args: String) -> Result<String, String> {
         match command_id.as_str() {
             "demucs.load" => do_load(&args),
-            "demucs.separate" => do_separate(&args),
             _ => Err(format!("Unknown command: {command_id}")),
         }
     }
 
     fn handle_event(_event_type: String, _data: String) -> Result<String, String> {
         Ok("".into())
+    }
+}
+
+// Typed audio extension interface — no JSON serialization
+impl AudioGuest for DemucsExtension {
+    fn separate_stems(input: AudioBuffer) -> Result<SeparationResult, String> {
+        let left = input.channels.first()
+            .ok_or("Input must have at least one channel")?;
+        let right = input.channels.get(1).unwrap_or(left);
+
+        MODEL.with(|cell| {
+            let model_ref = cell.borrow();
+            let model = model_ref
+                .as_ref()
+                .ok_or("Model not loaded. Call demucs.load first.")?;
+
+            let mut reporter = ProgressReporter::new();
+            reporter.start("Separating stems...");
+
+            let stems_result = pollster::block_on(model.separate_with_listener(
+                left,
+                right,
+                input.sample_rate,
+                &mut reporter,
+            ));
+
+            match stems_result {
+                Ok(stems) => {
+                    reporter.finish("Stem separation complete");
+                    Ok(SeparationResult {
+                        stems: stems
+                            .into_iter()
+                            .map(|s| Stem {
+                                id: map_stem_id(s.id),
+                                audio: AudioBuffer {
+                                    channels: vec![s.left, s.right],
+                                    sample_rate: input.sample_rate,
+                                },
+                            })
+                            .collect(),
+                    })
+                }
+                Err(e) => {
+                    reporter.fail_progress(&format!("Separation failed: {e}"));
+                    Err(format!("Separation failed: {e}"))
+                }
+            }
+        })
     }
 }
 

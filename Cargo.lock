@@ -1868,6 +1868,7 @@ version = "0.1.0"
 dependencies = [
  "burn",
  "demucs-core",
+ "getrandom 0.3.4",
  "pollster",
  "serde",
  "serde_json",

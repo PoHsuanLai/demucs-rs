@@ -312,6 +312,63 @@ interface progress {
     fail: func(handle-id: string, message: string) -> result<string, string>;
 }
 
+/// Panel UI — extensions register dockable panels with declarative widget trees
+interface panel-ui {
+    /// Register a panel (toolbar icon + center dock slot)
+    register-panel: func(panel-id: string, panel-name: string, icon-svg: string,
+                         default-width: f32, default-height: f32) -> result<string, string>;
+
+    /// Set the full widget tree for a panel (JSON)
+    set-panel-ui: func(panel-id: string, widget-tree-json: string) -> result<string, string>;
+
+    /// Update a single widget's properties by ID (JSON merge)
+    update-widget: func(panel-id: string, widget-id: string, properties-json: string) -> result<string, string>;
+}
+
+/// Audio types and operations
+interface audio {
+    /// A single audio channel (mono signal)
+    type audio-channel = list<f32>;
+
+    /// Multi-channel audio buffer
+    record audio-buffer {
+        /// Audio channels (typically 1=mono, 2=stereo)
+        channels: list<audio-channel>,
+        /// Sample rate in Hz
+        sample-rate: u32,
+    }
+
+    /// Stem identifier
+    enum stem-id {
+        drums,
+        bass,
+        other,
+        vocals,
+        guitar,
+        piano,
+    }
+
+    /// A single separated stem
+    record stem {
+        /// Which stem this is
+        id: stem-id,
+        /// The audio data
+        audio: audio-buffer,
+    }
+
+    /// Result of stem separation
+    record separation-result {
+        /// The separated stems
+        stems: list<stem>,
+    }
+
+    /// Read audio data from a clip (host-provided)
+    get-clip-audio: func(clip-id: string) -> result<audio-buffer, string>;
+
+    /// Write audio data to a new track (host-provided)
+    write-audio-to-track: func(track-name: string, audio: audio-buffer, position-beats: f64) -> result<string, string>;
+}
+
 /// Extension interface - exported by the WASM component
 interface extension {
     /// Initialize the extension (called once on load)
@@ -330,6 +387,14 @@ interface extension {
     handle-event: func(event-type: string, data: string) -> result<string, string>;
 }
 
+/// Audio processing extension — exported by extensions that process audio
+interface audio-extension {
+    use audio.{audio-buffer, separation-result};
+
+    /// Separate an audio buffer into stems
+    separate-stems: func(input: audio-buffer) -> result<separation-result, string>;
+}
+
 /// Main world - defines what extensions import and export
 world dawai-extension {
     // Host APIs (imported by extension)
@@ -342,7 +407,19 @@ world dawai-extension {
     import ui;
     import events;
     import progress;
+    import panel-ui;
 
     // Extension interface (exported by extension)
     export extension;
+}
+
+/// Audio extension world — superset of base world with audio capabilities
+world dawai-audio-extension {
+    include dawai-extension;
+
+    // Audio host APIs
+    import audio;
+
+    // Audio processing exports
+    export audio-extension;
 }
