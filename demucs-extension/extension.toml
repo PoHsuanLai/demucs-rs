@@ -5,6 +5,12 @@ description = "Split audio into stems (drums, bass, vocals, other) using Meta's 
 author = "DAWAI"
 extension_type = "wasm"
 main = "extension.wasm"
-
-[tags]
 tags = ["ai", "audio", "stems"]
+
+[[contributes.panels]]
+id = "dawai.demucs"
+name = "Demucs Source Separation"
+icon_svg = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>"""
+default_width = 320.0
+default_height = 400.0
+ui = "panel.json"

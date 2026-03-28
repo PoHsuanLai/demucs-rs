@@ -124,40 +124,7 @@ impl Guest for DemucsExtension {
     }
 
     fn activate() -> Result<String, String> {
-        // Register a panel so the extension shows in the toolbar
-        let icon_svg = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>"#;
-        let _ = dawai::extension::panel_ui::register_panel(
-            "dawai.demucs",
-            "Demucs Source Separation",
-            icon_svg,
-            320.0,
-            400.0,
-        );
-
-        // Set initial panel UI (uses "type" tag with snake_case, per WidgetNode serde config)
-        let ui_json = serde_json::json!({
-            "type": "vertical",
-            "children": [
-                { "type": "label", "text": "Demucs Source Separation", "bold": true },
-                { "type": "label", "text": "Split audio into individual stems using AI." },
-                { "type": "separator" },
-                { "type": "label", "text": "1. Load a model, then drop audio to separate." },
-                { "type": "button", "id": "load_model", "label": "Load Model", "enabled": true },
-                { "type": "separator" },
-                { "type": "label", "text": "Stems:" },
-                { "type": "checkbox", "id": "stem_drums", "label": "Drums", "checked": true },
-                { "type": "checkbox", "id": "stem_bass", "label": "Bass", "checked": true },
-                { "type": "checkbox", "id": "stem_vocals", "label": "Vocals", "checked": true },
-                { "type": "checkbox", "id": "stem_other", "label": "Other", "checked": true },
-                { "type": "separator" },
-                { "type": "button", "id": "separate", "label": "Separate Stems", "enabled": false }
-            ]
-        });
-        let _ = dawai::extension::panel_ui::set_panel_ui(
-            "dawai.demucs",
-            &ui_json.to_string(),
-        );
-
+        // Panel is registered from extension.toml by the host — no IPC calls needed.
         Ok("demucs extension activated".into())
     }
 
