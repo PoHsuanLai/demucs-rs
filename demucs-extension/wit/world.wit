@@ -98,6 +98,10 @@ interface document {
 
     /// Set playback position (beats)
     set-position: func(beats: f64) -> result<string, string>;
+
+    /// Read audio samples from a sampler node.
+    /// Returns channels as separate lists of f32 samples, plus sample rate.
+    get-node-audio: func(node-id: string) -> result<tuple<list<list<f32>>, u32>, string>;
 }
 
 /// Storage operations (extension-local persistence)
@@ -134,6 +138,12 @@ interface storage {
 
     /// Get extension-specific storage path
     get-storage-path: func() -> result<string, string>;
+
+    /// Read binary content from a file
+    read-bytes: func(path: string) -> result<list<u8>, string>;
+
+    /// Write binary content to a file
+    write-bytes: func(path: string, data: list<u8>) -> result<string, string>;
 }
 
 /// Network operations (HTTP only)

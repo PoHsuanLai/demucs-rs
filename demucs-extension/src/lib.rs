@@ -8,14 +8,9 @@ mod dsp;
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use burn::backend::NdArray;
-use demucs_core::listener::{ForwardEvent, ForwardListener};
-use demucs_core::{Demucs, ModelOptions};
 use serde::{Deserialize, Serialize};
 
 use exports::dawai::extension::extension::Guest;
-
-type B = NdArray;
 
 struct DemucsExtension;
 
@@ -26,91 +21,9 @@ struct TensorJson {
     data: Vec<f32>,
 }
 
-/// Which inference backend is loaded
-enum InferenceBackend {
-    /// ONNX model loaded on host GPU via gpu.run()
-    Onnx { session_id: String },
-    /// Burn model loaded in-process on CPU
-    Burn { model: Demucs<B> },
-}
-
+/// Stored ONNX session ID after loading
 thread_local! {
-    static BACKEND: RefCell<Option<InferenceBackend>> = const { RefCell::new(None) };
-}
-
-// =============================================================================
-// Progress reporting
-// =============================================================================
-
-struct ProgressReporter {
-    handle_id: Option<String>,
-}
-
-impl ProgressReporter {
-    fn new() -> Self {
-        Self { handle_id: None }
-    }
-
-    fn start(&mut self, title: &str) {
-        if let Ok(id) = dawai::extension::progress::show(title, true) {
-            self.handle_id = Some(id);
-        }
-    }
-
-    fn update(&mut self, message: &str, pct: f32) {
-        if let Some(ref id) = self.handle_id {
-            let _ = dawai::extension::progress::update(id, message, pct);
-        }
-    }
-
-    fn finish(&mut self, message: &str) {
-        if let Some(id) = self.handle_id.take() {
-            let _ = dawai::extension::progress::complete(&id, message);
-        }
-    }
-
-    fn fail_progress(&mut self, message: &str) {
-        if let Some(id) = self.handle_id.take() {
-            let _ = dawai::extension::progress::fail(&id, message);
-        }
-    }
-}
-
-impl ForwardListener for ProgressReporter {
-    fn on_event(&mut self, event: ForwardEvent) {
-        let Some(ref id) = self.handle_id else { return };
-
-        match event {
-            ForwardEvent::ChunkStarted { index, total } => {
-                let pct = index as f32 / total as f32;
-                let _ = dawai::extension::progress::update(
-                    id,
-                    &format!("Processing chunk {}/{}", index + 1, total),
-                    pct,
-                );
-            }
-            ForwardEvent::ChunkDone { index, total } => {
-                let pct = (index + 1) as f32 / total as f32;
-                let _ = dawai::extension::progress::update(
-                    id,
-                    &format!("Chunk {}/{} done", index + 1, total),
-                    pct,
-                );
-            }
-            ForwardEvent::StemDone { index, total } => {
-                let _ = dawai::extension::progress::update(
-                    id,
-                    &format!("Extracted stem {}/{}", index + 1, total),
-                    0.9,
-                );
-            }
-            _ => {}
-        }
-    }
-
-    fn wants_stats(&self) -> bool {
-        false
-    }
+    static SESSION_ID: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
 // =============================================================================
@@ -119,116 +32,208 @@ impl ForwardListener for ProgressReporter {
 
 fn do_load(args: &str) -> Result<String, String> {
     let parsed: serde_json::Value = serde_json::from_str(args).unwrap_or_default();
-    let format = parsed["format"].as_str().unwrap_or("safetensors");
 
-    let bytes = dawai::extension::storage::get("model_bytes")
+    // Read ONNX model bytes from storage
+    let model_key = parsed["model_key"].as_str().unwrap_or("model_onnx");
+    let bytes_str = dawai::extension::storage::get(model_key)
         .map_err(|e| format!("Failed to get model bytes: {e}"))?;
 
-    if bytes.is_empty() {
-        return Err("No model bytes in storage. Download the model first.".into());
+    if bytes_str.is_empty() {
+        return Err("No model bytes in storage. Download the ONNX model first.".into());
     }
 
-    match format {
-        "onnx" => {
-            // Load via host GPU API
-            let session_id = dawai::extension::gpu::load_model(
-                "htdemucs",
-                "onnx",
-                bytes.as_bytes(),
-            )
-            .map_err(|e| format!("GPU load failed: {e}"))?;
+    // Load via host GPU API
+    let session_id = dawai::extension::gpu::load_model(
+        "htdemucs",
+        "onnx",
+        bytes_str.as_bytes(),
+    )
+    .map_err(|e| format!("GPU load failed: {e}"))?;
 
-            BACKEND.with(|cell| {
-                *cell.borrow_mut() = Some(InferenceBackend::Onnx { session_id: session_id.clone() });
-            });
+    SESSION_ID.with(|cell| {
+        *cell.borrow_mut() = Some(session_id.clone());
+    });
 
-            Ok(format!("ONNX model loaded on GPU, session={session_id}"))
-        }
-        "safetensors" | _ => {
-            // Burn CPU fallback
-            let device = burn::backend::ndarray::NdArrayDevice::Cpu;
-            let model = Demucs::<B>::from_bytes(ModelOptions::FourStem, bytes.as_bytes(), device)
-                .map_err(|e| format!("Failed to load model: {e}"))?;
-
-            BACKEND.with(|cell| {
-                *cell.borrow_mut() = Some(InferenceBackend::Burn { model });
-            });
-
-            Ok("Burn model loaded on CPU".into())
-        }
-    }
+    Ok(format!("ONNX model loaded, session={session_id}"))
 }
 
 fn do_separate(args: &str) -> Result<String, String> {
     let parsed: serde_json::Value = serde_json::from_str(args)
         .map_err(|e| format!("Invalid args JSON: {e}"))?;
-    let sample_path = parsed["sample_path"]
+    let node_id = parsed["node_id"]
         .as_str()
-        .ok_or("Missing sample_path in args")?;
+        .ok_or("Missing node_id in args")?;
     let start_time = parsed["start_time"].as_f64().unwrap_or(0.0);
 
-    // Read audio file via storage
-    let audio_data = dawai::extension::storage::read_file(sample_path)
+    let session_id = SESSION_ID.with(|cell| cell.borrow().clone())
+        .ok_or("Model not loaded. Call demucs.load first.")?;
+
+    // Show progress
+    let progress_id = dawai::extension::progress::show("Separating stems...", true)
+        .unwrap_or_default();
+
+    // 1. Read audio samples from the sampler node
+    let (channels, sample_rate) = dawai::extension::document::get_node_audio(node_id)
         .map_err(|e| format!("Failed to read audio: {e}"))?;
 
-    // Parse WAV (simple: assume f32 PCM stereo for now)
-    // TODO: proper WAV parsing
-    let _ = &audio_data;
+    if channels.is_empty() {
+        return Err("No audio channels returned".into());
+    }
 
-    BACKEND.with(|cell| {
-        let backend_ref = cell.borrow();
-        let backend = backend_ref
-            .as_ref()
-            .ok_or("Model not loaded. Call demucs.load first.")?;
+    let left = &channels[0];
+    let right = if channels.len() > 1 { &channels[1] } else { left };
 
-        match backend {
-            InferenceBackend::Onnx { session_id } => {
-                separate_onnx(session_id, sample_path, start_time)
-            }
-            InferenceBackend::Burn { model } => {
-                separate_burn(model, sample_path, start_time)
+    // 2. Resample to 44100 if needed
+    // TODO: use rubato for resampling. For now, assume 44100.
+    let _ = sample_rate;
+
+    // 3. Build chunks with overlap
+    let chunks = dsp::build_chunks(left, right, dsp::TRAINING_LENGTH, dsp::OVERLAP);
+    let num_chunks = chunks.len();
+    let total_frames = left.len();
+
+    // 4. Accumulate stems: [4 stems][2 channels][total_frames]
+    let mut stem_accum = vec![vec![vec![0.0f32; total_frames]; 2]; 4];
+    let mut weight_accum = vec![0.0f32; total_frames];
+
+    for (i, chunk) in chunks.iter().enumerate() {
+        let _ = dawai::extension::progress::update(
+            &progress_id,
+            &format!("Processing chunk {}/{}", i + 1, num_chunks),
+            i as f32 / num_chunks as f32,
+        );
+
+        // Pad chunk to TRAINING_LENGTH
+        let mut chunk_left = chunk.left.clone();
+        let mut chunk_right = chunk.right.clone();
+        chunk_left.resize(dsp::TRAINING_LENGTH, 0.0);
+        chunk_right.resize(dsp::TRAINING_LENGTH, 0.0);
+
+        // Build waveform tensor [1, 2, TRAINING_LENGTH]
+        let mut waveform_data = Vec::with_capacity(2 * dsp::TRAINING_LENGTH);
+        waveform_data.extend_from_slice(&chunk_left);
+        waveform_data.extend_from_slice(&chunk_right);
+
+        // Compute magnitude spectrogram [1, 4, 2048, T]
+        let magspec = dsp::compute_magnitude_spectrogram(&chunk_left, &chunk_right);
+
+        // Build input tensors JSON
+        let mut inputs: HashMap<String, TensorJson> = HashMap::new();
+        inputs.insert("mix".into(), TensorJson {
+            shape: vec![1, 2, dsp::TRAINING_LENGTH],
+            data: waveform_data,
+        });
+        inputs.insert("spectrogram".into(), TensorJson {
+            shape: vec![1, 4, magspec.freq_bins, magspec.time_frames],
+            data: magspec.data,
+        });
+
+        let inputs_json = serde_json::to_string(&inputs)
+            .map_err(|e| format!("Serialize inputs: {e}"))?;
+
+        // Run ONNX inference
+        let outputs_json = dawai::extension::gpu::run(&session_id, &inputs_json)
+            .map_err(|e| format!("GPU run failed: {e}"))?;
+
+        let outputs: HashMap<String, TensorJson> = serde_json::from_str(&outputs_json)
+            .map_err(|e| format!("Parse outputs: {e}"))?;
+
+        // The ONNX model outputs stems as output_1: [1, 4, 2, TRAINING_LENGTH]
+        let stems_tensor = outputs.get("output_1")
+            .ok_or("Missing output_1 in ONNX output")?;
+
+        // Overlap-add into accumulator
+        let actual_len = chunk.actual_len;
+        let start = chunk.start;
+        for stem_idx in 0..4 {
+            for ch in 0..2 {
+                for j in 0..actual_len {
+                    if start + j < total_frames {
+                        let flat_idx = ((stem_idx * 2 + ch) * dsp::TRAINING_LENGTH) + j;
+                        if flat_idx < stems_tensor.data.len() {
+                            stem_accum[stem_idx][ch][start + j] += stems_tensor.data[flat_idx];
+                        }
+                    }
+                }
             }
         }
-    })
+
+        for j in 0..actual_len {
+            if start + j < total_frames {
+                weight_accum[start + j] += 1.0;
+            }
+        }
+    }
+
+    // 5. Normalize by overlap weights
+    for stem_idx in 0..4 {
+        for ch in 0..2 {
+            for j in 0..total_frames {
+                if weight_accum[j] > 0.0 {
+                    stem_accum[stem_idx][ch][j] /= weight_accum[j];
+                }
+            }
+        }
+    }
+
+    // 6. Write stem WAVs and emit document changes
+    let stem_names = ["drums", "bass", "vocals", "other"];
+    let storage_path = dawai::extension::storage::get_storage_path()
+        .unwrap_or_else(|_| ".".into());
+    let stems_dir = format!("{storage_path}/stems");
+
+    let _ = dawai::extension::progress::update(&progress_id, "Writing stems...", 0.9);
+
+    for (idx, name) in stem_names.iter().enumerate() {
+        // Interleave stereo for WAV
+        let left_ch = &stem_accum[idx][0];
+        let right_ch = &stem_accum[idx][1];
+        let mut interleaved = Vec::with_capacity(total_frames * 2);
+        for j in 0..total_frames {
+            interleaved.push(left_ch[j]);
+            interleaved.push(right_ch[j]);
+        }
+
+        // Encode WAV to bytes
+        let wav_path = format!("{stems_dir}/{name}.wav");
+        let wav_bytes = encode_wav(&interleaved, 44100, 2)
+            .map_err(|e| format!("WAV encode: {e}"))?;
+
+        // Write via binary storage API
+        dawai::extension::storage::write_bytes(&wav_path, &wav_bytes)
+            .map_err(|e| format!("Write stem: {e}"))?;
+
+        // Create sampler node pointing at the stem WAV
+        let params = serde_json::json!({
+            "sample_path": wav_path,
+            "start_time": start_time,
+        });
+        let _node_id = dawai::extension::document::add_node("sampler", &params.to_string())
+            .map_err(|e| format!("Add sampler node: {e}"))?;
+    }
+
+    let _ = dawai::extension::progress::complete(&progress_id, "Stem separation complete");
+
+    Ok(format!("Separated into {} stems", stem_names.len()))
 }
 
-fn separate_onnx(
-    session_id: &str,
-    _sample_path: &str,
-    _start_time: f64,
-) -> Result<String, String> {
-    // TODO: Full ONNX pipeline:
-    // 1. Read and decode audio file to f32 PCM
-    // 2. Deinterleave to left/right channels
-    // 3. Resample to 44100 if needed
-    // 4. Build chunks with overlap
-    // 5. For each chunk:
-    //    a. Pad to TRAINING_LENGTH
-    //    b. Build waveform tensor [1, 2, TRAINING_LENGTH]
-    //    c. Compute magnitude spectrogram [1, 4, 2048, T]
-    //    d. Call gpu.run(session_id, { "waveform": ..., "spectrogram": ... })
-    //    e. Parse output stems [1, 4, 2, TRAINING_LENGTH]
-    // 6. Overlap-add all chunks
-    // 7. Write stem WAVs via storage
-    // 8. Emit document changes (add sampler + volume nodes)
-
-    let _ = session_id;
-    Err("ONNX separation pipeline not yet implemented".into())
-}
-
-fn separate_burn(
-    model: &Demucs<B>,
-    _sample_path: &str,
-    _start_time: f64,
-) -> Result<String, String> {
-    // TODO: Full Burn pipeline:
-    // 1. Read and decode audio file
-    // 2. Run model.separate_with_listener()
-    // 3. Write stem WAVs via storage
-    // 4. Emit document changes
-
-    let _ = model;
-    Err("Burn separation pipeline not yet implemented".into())
+/// Encode interleaved f32 samples to WAV bytes in memory
+fn encode_wav(samples: &[f32], sample_rate: u32, channels: u16) -> Result<Vec<u8>, String> {
+    let mut buf = Vec::new();
+    let cursor = std::io::Cursor::new(&mut buf);
+    let spec = hound::WavSpec {
+        channels,
+        sample_rate,
+        bits_per_sample: 32,
+        sample_format: hound::SampleFormat::Float,
+    };
+    let mut writer = hound::WavWriter::new(cursor, spec)
+        .map_err(|e| format!("WAV writer: {e}"))?;
+    for &s in samples {
+        writer.write_sample(s).map_err(|e| format!("WAV write: {e}"))?;
+    }
+    writer.finalize().map_err(|e| format!("WAV finalize: {e}"))?;
+    Ok(buf)
 }
 
 // =============================================================================
@@ -245,9 +250,9 @@ impl Guest for DemucsExtension {
     }
 
     fn deactivate() -> Result<String, String> {
-        BACKEND.with(|cell| {
-            if let Some(InferenceBackend::Onnx { session_id }) = cell.borrow().as_ref() {
-                let _ = dawai::extension::gpu::unload_model(session_id);
+        SESSION_ID.with(|cell| {
+            if let Some(id) = cell.borrow().as_ref() {
+                let _ = dawai::extension::gpu::unload_model(id);
             }
             *cell.borrow_mut() = None;
         });
