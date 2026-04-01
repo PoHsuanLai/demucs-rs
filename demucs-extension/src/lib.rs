@@ -21,6 +21,13 @@ struct TensorJson {
     data: Vec<f32>,
 }
 
+/// HuggingFace URL for the HTDemucs ONNX model (~290 MB)
+const MODEL_URL: &str =
+    "https://huggingface.co/smank/htdemucs-onnx/resolve/main/htdemucs.onnx";
+
+/// Panel ID (must match extension.toml)
+const PANEL_ID: &str = "dawai.demucs";
+
 /// Stored ONNX session ID after loading
 thread_local! {
     static SESSION_ID: RefCell<Option<String>> = const { RefCell::new(None) };
@@ -30,29 +37,83 @@ thread_local! {
 // Commands
 // =============================================================================
 
-fn do_load(args: &str) -> Result<String, String> {
-    let parsed: serde_json::Value = serde_json::from_str(args).unwrap_or_default();
+/// Get the on-disk path for the ONNX model.
+fn model_path() -> Result<String, String> {
+    let storage_path = dawai::extension::storage::get_storage_path()
+        .unwrap_or_else(|_| ".".into());
+    Ok(format!("{storage_path}/htdemucs.onnx"))
+}
 
-    // Read ONNX model bytes from storage
-    let model_key = parsed["model_key"].as_str().unwrap_or("model_onnx");
-    let bytes_str = dawai::extension::storage::get(model_key)
-        .map_err(|e| format!("Failed to get model bytes: {e}"))?;
+/// Check if the model file exists on disk.
+fn model_exists() -> bool {
+    let path = match model_path() {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+    dawai::extension::storage::file_exists(&path)
+        .unwrap_or_else(|_| "false".into()) == "true"
+}
 
-    if bytes_str.is_empty() {
-        return Err("No model bytes in storage. Download the ONNX model first.".into());
+fn do_download_model() -> Result<String, String> {
+    if model_exists() {
+        return Ok("Model already downloaded".into());
     }
+
+    notify_info("Downloading HTDemucs model (~290 MB)...");
+
+    let path = model_path()?;
+
+    // Download via host-side streaming download
+    dawai::extension::storage::download_file(MODEL_URL, &path)
+        .map_err(|e| format!("Download failed: {e}"))?;
+
+    Ok("Model downloaded".into())
+}
+
+fn do_load(_args: &str) -> Result<String, String> {
+    let path = model_path()?;
+
+    if !model_exists() {
+        return Err("Model file not found. Please download first.".into());
+    }
+
+    notify_info("Loading ONNX model...");
+
+    // Read model bytes from disk
+    let model_bytes = dawai::extension::storage::read_bytes(&path)
+        .map_err(|e| format!("Read model file: {e}"))?;
+
+    if model_bytes.is_empty() {
+        return Err("Model file is empty. Please re-download.".into());
+    }
+
+    notify_info(&format!("Loading {:.1} MB into GPU runtime...", model_bytes.len() as f64 / 1_048_576.0));
 
     // Load via host GPU API
     let session_id = dawai::extension::gpu::load_model(
         "htdemucs",
         "onnx",
-        bytes_str.as_bytes(),
+        &model_bytes,
     )
     .map_err(|e| format!("GPU load failed: {e}"))?;
 
     SESSION_ID.with(|cell| {
         *cell.borrow_mut() = Some(session_id.clone());
     });
+
+    notify_success("Model loaded successfully");
+
+    // Enable the separate button
+    let _ = dawai::extension::panel_ui::update_widget(
+        PANEL_ID,
+        "separate",
+        &serde_json::json!({"enabled": true}).to_string(),
+    );
+    let _ = dawai::extension::panel_ui::update_widget(
+        PANEL_ID,
+        "load_model",
+        &serde_json::json!({"label": "Model Loaded", "enabled": false}).to_string(),
+    );
 
     Ok(format!("ONNX model loaded, session={session_id}"))
 }
@@ -73,7 +134,7 @@ fn do_separate(args: &str) -> Result<String, String> {
         .unwrap_or_default();
 
     // 1. Read audio samples from the sampler node
-    let (channels, sample_rate) = dawai::extension::document::get_node_audio(node_id)
+    let (channels, sample_rate) = dawai::extension::project::get_node_audio(node_id)
         .map_err(|e| format!("Failed to read audio: {e}"))?;
 
     if channels.is_empty() {
@@ -208,7 +269,7 @@ fn do_separate(args: &str) -> Result<String, String> {
             "sample_path": wav_path,
             "start_time": start_time,
         });
-        let _node_id = dawai::extension::document::add_node("sampler", &params.to_string())
+        let _node_id = dawai::extension::project::add_node("sampler", &params.to_string())
             .map_err(|e| format!("Add sampler node: {e}"))?;
     }
 
@@ -237,6 +298,22 @@ fn encode_wav(samples: &[f32], sample_rate: u32, channels: u16) -> Result<Vec<u8
 }
 
 // =============================================================================
+// Toast helpers
+// =============================================================================
+
+fn notify_info(msg: &str) {
+    let _ = dawai::extension::ui::notify(msg, dawai::extension::ui::NotifyLevel::Info);
+}
+
+fn notify_success(msg: &str) {
+    let _ = dawai::extension::ui::notify(msg, dawai::extension::ui::NotifyLevel::Success);
+}
+
+fn notify_error(msg: &str) {
+    let _ = dawai::extension::ui::notify(msg, dawai::extension::ui::NotifyLevel::Error);
+}
+
+// =============================================================================
 // Extension interface
 // =============================================================================
 
@@ -246,6 +323,20 @@ impl Guest for DemucsExtension {
     }
 
     fn activate() -> Result<String, String> {
+        // Check if model file exists on disk — update button accordingly
+        if model_exists() {
+            let _ = dawai::extension::panel_ui::update_widget(
+                PANEL_ID,
+                "load_model",
+                &serde_json::json!({"label": "Load Model", "enabled": true}).to_string(),
+            );
+            let _ = dawai::extension::panel_ui::update_widget(
+                PANEL_ID,
+                "model_progress",
+                &serde_json::json!({"value": 1.0, "label": "Model downloaded"}).to_string(),
+            );
+        }
+
         Ok("demucs extension activated".into())
     }
 
@@ -261,14 +352,88 @@ impl Guest for DemucsExtension {
 
     fn execute_command(command_id: String, args: String) -> Result<String, String> {
         match command_id.as_str() {
+            "demucs.download" => do_download_model(),
             "demucs.load" => do_load(&args),
             "demucs.separate" => do_separate(&args),
             _ => Err(format!("Unknown command: {command_id}")),
         }
     }
 
-    fn handle_event(_event_type: String, _data: String) -> Result<String, String> {
-        Ok("".into())
+    fn handle_event(event_type: String, data: String) -> Result<String, String> {
+        if event_type != "ui" {
+            return Ok("".into());
+        }
+
+        let event: serde_json::Value = serde_json::from_str(&data)
+            .map_err(|e| format!("Parse UI event: {e}"))?;
+
+        let widget_id = event["widget_id"].as_str().unwrap_or("");
+        let event_type = event["event_type"].as_str().unwrap_or("");
+
+        match (widget_id, event_type) {
+            ("load_model", "clicked") => {
+                // Disable button while working
+                let _ = dawai::extension::panel_ui::update_widget(
+                    PANEL_ID,
+                    "load_model",
+                    &serde_json::json!({"label": "Loading...", "enabled": false}).to_string(),
+                );
+
+                // Download if needed, then load
+                if !model_exists() {
+                    let _ = dawai::extension::panel_ui::update_widget(
+                        PANEL_ID,
+                        "model_progress",
+                        &serde_json::json!({"value": 0.1, "label": "Downloading..."}).to_string(),
+                    );
+
+                    match do_download_model() {
+                        Ok(msg) => notify_info(&msg),
+                        Err(e) => {
+                            let _ = dawai::extension::panel_ui::update_widget(
+                                PANEL_ID,
+                                "load_model",
+                                &serde_json::json!({"label": "Download & Load Model", "enabled": true}).to_string(),
+                            );
+                            notify_error(&format!("Download failed: {e}"));
+                            return Err(e);
+                        }
+                    }
+                }
+
+                // Load the model into GPU runtime
+                match do_load("{}") {
+                    Ok(msg) => {
+                        notify_success("Model loaded and ready");
+                        Ok(msg)
+                    }
+                    Err(e) => {
+                        let _ = dawai::extension::panel_ui::update_widget(
+                            PANEL_ID,
+                            "load_model",
+                            &serde_json::json!({"label": "Retry Load", "enabled": true}).to_string(),
+                        );
+                        notify_error(&format!("Load failed: {e}"));
+                        Err(e)
+                    }
+                }
+            }
+
+            ("separate", "clicked") => {
+                // Get the currently selected node
+                let node_id = dawai::extension::project::get_selected_node_id()
+                    .map_err(|e| format!("Failed to get selection: {e}"))?
+                    .ok_or("No node selected. Select a sampler node first.")?;
+
+                let args = serde_json::json!({
+                    "node_id": node_id,
+                    "start_time": 0.0,
+                });
+                do_separate(&args.to_string())
+            }
+
+            _ => Ok("".into()),
+        }
     }
 }
 

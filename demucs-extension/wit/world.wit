@@ -1,97 +1,518 @@
 // DAWAI Extension API - WebAssembly Interface Types (WIT)
 //
-// Extensions interact with the DAW primarily through the document IR:
-//   - Write: emit changes (add nodes, set parameters, change tempo, etc.)
-//   - Read: query current state (tempo, node list, parameter values)
-//
-// Side-effectful APIs (storage, network, audio, UI panels, progress)
-// are provided as separate interfaces.
+// This defines the contract between DAWAI (the host) and extensions (WASM components).
+// Extensions import these interfaces to call into the host, and export the extension interface
+// for the host to call into the extension.
 
 package dawai:extension@0.1.0;
 
-/// Document IR — the primary extension API
-///
-/// Extensions modify the DAW by emitting document changes (the same IR
-/// used internally). They can also query current document state.
-interface document {
-    // =========================================================================
-    // Write: emit document changes
-    // =========================================================================
-
-    /// Add a node to the graph. Returns the new node ID.
-    /// params-json is a JSON object of node parameters.
-    add-node: func(node-type: string, params-json: string) -> result<string, string>;
-
-    /// Remove a node from the graph
-    remove-node: func(node-id: string) -> result<string, string>;
-
-    /// Connect two nodes
-    connect-nodes: func(src: string, dest: string, src-out: u32, dest-in: u32) -> result<string, string>;
-
-    /// Disconnect two nodes
-    disconnect-nodes: func(src: string, dest: string, src-out: u32, dest-in: u32) -> result<string, string>;
-
-    /// Set a parameter on a node (value is JSON-encoded)
-    set-parameter: func(node-id: string, param-name: string, value: string) -> result<string, string>;
-
-    /// Set tempo (BPM)
-    set-tempo: func(bpm: f32) -> result<string, string>;
-
-    /// Set time signature
-    set-time-signature: func(numerator: u32, denominator: u32) -> result<string, string>;
-
-    /// Set loop range
-    set-loop-range: func(start-beats: f64, end-beats: f64) -> result<string, string>;
-
-    /// Clear loop range (disable looping)
-    clear-loop-range: func() -> result<string, string>;
-
-    /// Set master volume (0.0–2.0)
-    set-master-volume: func(volume: f32) -> result<string, string>;
-
-    /// Set master pan (-1.0 to 1.0)
-    set-master-pan: func(pan: f32) -> result<string, string>;
-
-    /// Batch apply multiple changes (JSON array of DocumentChange)
-    apply-changes: func(changes-json: string) -> result<string, string>;
+/// Common types used across all interfaces
+interface types {
+    /// Text range in a document
+    record text-range {
+        start-line: u32,
+        start-column: u32,
+        end-line: u32,
+        end-column: u32,
+    }
 
     // =========================================================================
-    // Read: query document state
+    // Document IR Types
+    // =========================================================================
+    // These types define the complete document model. They are used by the
+    // language-adapter interface and can be used by any extension that
+    // manipulates the document graph.
+
+    /// Node value — parameter values for audio nodes
+    variant node-value {
+        float-val(f64),
+        int-val(s64),
+        bool-val(bool),
+        str-val(string),
+    }
+
+    /// Waveform shape for oscillators and LFOs
+    enum waveform {
+        sine,
+        saw,
+        square,
+        triangle,
+        noise,
+    }
+
+    /// Clip duration — how long a sampler or sequencer plays
+    variant clip-duration {
+        entire-sample,
+        beats(f64),
+    }
+
+    /// Send routing mode
+    enum send-mode {
+        pre-fader,
+        post-fader,
+    }
+
+    /// Sidechain signal tap point
+    enum sidechain-tap-point {
+        pre-fader,
+        post-fader,
+    }
+
+    /// Audio plugin format
+    enum plugin-format {
+        vst2,
+        vst3,
+        clap,
+        audio-unit,
+    }
+
+    /// Automation interpolation type
+    enum interpolation-type {
+        linear,
+        stepped,
+        bezier,
+        exponential,
+    }
+
+    /// Reference to a node's output (for wiring)
+    record node-ref {
+        node-id: string,
+        output-index: u32,
+    }
+
+    /// A constant value input with optional exposure
+    record value-input {
+        value: node-value,
+        exposed: bool,
+    }
+
+    /// Node input — where a parameter gets its value
+    variant node-input {
+        node(node-ref),
+        value(value-input),
+        scope(string),
+    }
+
+    /// Key-value pair for node parameters (HashMap<String, NodeInput>)
+    record param-entry {
+        name: string,
+        input: node-input,
+    }
+
+    /// Modulation target
+    record mod-target {
+        target-node-id: string,
+        parameter-name: string,
+        depth: f64,
+    }
+
+    /// Automation curve point
+    record automation-point {
+        time: f64,
+        value: f64,
+    }
+
+    /// Automation curve (points + interpolation)
+    record automation-curve {
+        points: list<automation-point>,
+        interpolation: interpolation-type,
+    }
+
+    /// MIDI note event
+    record midi-note {
+        note: u8,
+        velocity: u8,
+        start: f64,
+        duration: f64,
+    }
+
+    /// Poly synth configuration
+    record poly-synth-config {
+        waveform: waveform,
+        polyphony: u8,
+    }
+
+    /// Generator type (oscillator, LFO, neural, poly synth)
+    variant generator-type {
+        oscillator(waveform),
+        lfo(waveform),
+        neural(string),
+        poly-synth(poly-synth-config),
+    }
+
+    /// Modulator type
+    variant modulator-type {
+        envelope,
+        automation(automation-curve),
+    }
+
+    /// Audio node — a node in the DSP graph
+    variant audio-node {
+        generator(generator-node),
+        sampler(sampler-node),
+        audio-input(audio-input-node),
+        midi-input(midi-input-node),
+        midi-sequencer(midi-sequencer-node),
+        effect(effect-node),
+        volume-control(volume-control-node),
+        modulator(modulator-node),
+        send(send-node),
+        return-bus(return-node),
+        sidechain(sidechain-node),
+        plugin-instance(plugin-instance-node),
+    }
+
+    record generator-node {
+        generator-type: generator-type,
+        params: list<param-entry>,
+    }
+
+    record sampler-node {
+        sample-path: string,
+        playback-rate: node-input,
+        loop-enabled: bool,
+        loop-start: node-input,
+        loop-end: node-input,
+        start-time: f64,
+        duration: clip-duration,
+    }
+
+    record audio-input-node {
+        device-index: u32,
+        channel: u32,
+    }
+
+    record midi-input-node {
+        device-index: u32,
+        channel: option<u8>,
+    }
+
+    record midi-sequencer-node {
+        notes: list<midi-note>,
+        start-time: f64,
+        duration: clip-duration,
+        loop-enabled: bool,
+    }
+
+    record effect-node {
+        effect-name: string,
+        params: list<param-entry>,
+    }
+
+    record volume-control-node {
+        volume: node-input,
+        pan: node-input,
+        input: option<node-input>,
+    }
+
+    record modulator-node {
+        modulator-type: modulator-type,
+        params: list<param-entry>,
+        output-target: mod-target,
+    }
+
+    record send-node {
+        return-bus-id: string,
+        level: node-input,
+        mode: send-mode,
+    }
+
+    record return-node {
+        bus-index: u32,
+    }
+
+    record sidechain-node {
+        source-node-id: string,
+        tap-point: sidechain-tap-point,
+    }
+
+    record plugin-instance-node {
+        plugin-path: string,
+        format: plugin-format,
+        state: option<list<u8>>,
+        params: list<param-entry>,
+    }
+
+    /// Node change — mutation to the DSP graph
+    variant node-change {
+        add-node(add-node-change),
+        remove-node(remove-node-change),
+        connect-nodes(connect-nodes-change),
+        disconnect-nodes(disconnect-nodes-change),
+        set-parameter(set-parameter-change),
+        replace-node(replace-node-change),
+    }
+
+    record add-node-change {
+        node-id: string,
+        node: audio-node,
+        position: option<tuple<f32, f32>>,
+    }
+
+    record remove-node-change {
+        node-id: string,
+    }
+
+    record connect-nodes-change {
+        source-node-id: string,
+        source-output: u32,
+        dest-node-id: string,
+        dest-input: u32,
+    }
+
+    record disconnect-nodes-change {
+        source-node-id: string,
+        source-output: u32,
+        dest-node-id: string,
+        dest-input: u32,
+    }
+
+    record set-parameter-change {
+        node-id: string,
+        parameter-name: string,
+        value: node-value,
+    }
+
+    record replace-node-change {
+        node-id: string,
+        new-node: audio-node,
+    }
+
+    /// Loop range
+    record loop-range {
+        start: f64,
+        end: f64,
+    }
+
+    /// Transport change
+    variant transport-change {
+        set-tempo(f32),
+        set-time-signature(time-signature-change),
+        set-loop-range(option<loop-range>),
+    }
+
+    record time-signature-change {
+        numerator: u32,
+        denominator: u32,
+    }
+
+    /// Master change
+    variant master-change {
+        set-volume(f32),
+        set-pan(f32),
+    }
+
+    // =========================================================================
+    // Marker and Region Types
     // =========================================================================
 
-    /// Get current tempo (BPM)
-    get-tempo: func() -> result<f32, string>;
+    /// Unique marker ID
+    type marker-id = string;
 
-    /// Get time signature (numerator, denominator)
-    get-time-signature: func() -> result<tuple<u32, u32>, string>;
+    /// Unique region ID
+    type region-id = string;
 
-    /// Get all node IDs in the graph
-    get-node-ids: func() -> result<list<string>, string>;
+    /// Timeline marker
+    record marker {
+        id: marker-id,
+        name: string,
+        position: f64,
+        color: option<string>,
+    }
 
-    /// Get node info as JSON
-    get-node: func(node-id: string) -> result<string, string>;
-
-    /// Get a parameter value (JSON-encoded)
-    get-parameter: func(node-id: string, param-name: string) -> result<string, string>;
-
-    /// Get connections from a node (JSON)
-    get-connections: func(node-id: string) -> result<string, string>;
+    /// Timeline region (start/end range with name)
+    record region {
+        id: region-id,
+        name: string,
+        start: f64,
+        end: f64,
+        color: option<string>,
+    }
 
     // =========================================================================
-    // Transport control (imperative — not persisted in document)
+    // Automation Envelope Types
     // =========================================================================
 
+    /// Automation envelope point
+    record automation-envelope-point {
+        time: f64,
+        value: f32,
+        curve-type: interpolation-type,
+    }
+
+    /// Automation envelope (parameter automation over time)
+    record automation-envelope {
+        points: list<automation-envelope-point>,
+    }
+
+    /// Document change — top-level mutation type
+    variant document-change {
+        node(node-change),
+        transport(transport-change),
+        master(master-change),
+        automation(automation-change),
+        metadata(metadata-change),
+    }
+
+    /// Automation change — timeline automation for node parameters
+    variant automation-change {
+        set-envelope(set-envelope-change),
+        remove-envelope(remove-envelope-change),
+        clear-node(clear-automation-node-change),
+    }
+
+    record set-envelope-change {
+        node-id: string,
+        parameter-name: string,
+        envelope: automation-envelope,
+    }
+
+    record remove-envelope-change {
+        node-id: string,
+        parameter-name: string,
+    }
+
+    record clear-automation-node-change {
+        node-id: string,
+    }
+
+    /// Metadata change — UI/project state (not musical content)
+    variant metadata-change {
+        add-marker(marker),
+        update-marker(marker),
+        remove-marker(marker-id),
+        add-region(region),
+        update-region(region),
+        remove-region(region-id),
+        set-loop-to-region(region-id),
+    }
+
+    // =========================================================================
+    // Document State (for code generation)
+    // =========================================================================
+
+    /// Document metadata
+    record document-metadata {
+        title: string,
+        author: string,
+        version: string,
+    }
+
+    /// Node network entry (node-id → audio-node)
+    record node-entry {
+        node-id: string,
+        node: audio-node,
+    }
+
+    /// Drum kit definition
+    record drum-kit {
+        name: string,
+        samples: list<drum-kit-sample>,
+    }
+
+    record drum-kit-sample {
+        key: string,
+        path: string,
+    }
+
+    /// Global parameter entry
+    record global-param {
+        name: string,
+        value: f32,
+    }
+
+    /// Drum kit entry
+    record drum-kit-entry {
+        name: string,
+        kit: drum-kit,
+    }
+
+    /// Full document state — passed to generate()
+    record document-state {
+        metadata: document-metadata,
+        nodes: list<node-entry>,
+        tempo: f32,
+        time-signature: tuple<u32, u32>,
+        parameters: list<global-param>,
+        drum-kits: list<drum-kit-entry>,
+    }
+}
+
+/// Code editor manipulation
+interface editor {
+    use types.{text-range};
+
+    /// Get the entire editor text
+    get-text: func() -> result<string, string>;
+
+    /// Get the current selection range
+    get-selection: func() -> text-range;
+
+    /// Get the selected text
+    get-selected-text: func() -> result<string, string>;
+
+    /// Insert text at cursor
+    insert-text: func(text: string) -> result<string, string>;
+
+    /// Replace text in a range
+    replace-text: func(range: text-range, text: string) -> result<string, string>;
+
+    /// Replace current selection with text
+    replace-selection: func(text: string) -> result<string, string>;
+
+    /// Replace text in a specific range
+    replace-range: func(range: text-range, text: string) -> result<string, string>;
+
+    /// Set selection range
+    set-selection: func(range: text-range) -> result<string, string>;
+
+    /// Get cursor position
+    get-cursor-position: func() -> text-range;
+
+    /// Set cursor position
+    set-cursor-position: func(line: u32, column: u32) -> result<string, string>;
+
+    /// Begin an undo group
+    begin-undo-group: func(label: string) -> result<string, string>;
+
+    /// End an undo group
+    end-undo-group: func() -> result<string, string>;
+
+    /// Undo last change
+    undo: func() -> result<string, string>;
+
+    /// Redo last undone change
+    redo: func() -> result<string, string>;
+}
+
+/// Transport control (play, stop, record, tempo)
+interface transport {
     /// Start playback
     play: func() -> result<string, string>;
 
     /// Stop playback
     stop: func() -> result<string, string>;
 
-    /// Pause playback
+    /// Pause playback (can resume)
     pause: func() -> result<string, string>;
+
+    /// Toggle play/pause
+    toggle-play: func() -> result<string, string>;
 
     /// Check if playing
     is-playing: func() -> result<bool, string>;
+
+    /// Start recording
+    start-recording: func() -> result<string, string>;
+
+    /// Stop recording
+    stop-recording: func() -> result<string, string>;
+
+    /// Get current tempo
+    get-tempo: func() -> result<f64, string>;
+
+    /// Set tempo (BPM)
+    set-tempo: func(bpm: f64) -> result<string, string>;
 
     /// Get playback position (beats)
     get-position: func() -> result<f64, string>;
@@ -99,12 +520,122 @@ interface document {
     /// Set playback position (beats)
     set-position: func(beats: f64) -> result<string, string>;
 
+    /// Get transport state
+    get-state: func() -> result<string, string>;
+
+    /// Get time signature (numerator, denominator)
+    get-time-signature: func() -> result<tuple<u32, u32>, string>;
+
+    /// Set time signature
+    set-time-signature: func(numerator: u32, denominator: u32) -> result<string, string>;
+
+    /// Check if loop is enabled
+    is-loop-enabled: func() -> result<bool, string>;
+
+    /// Enable/disable loop
+    set-loop-enabled: func(enabled: bool) -> result<string, string>;
+
+    /// Get loop range (start, end in beats)
+    get-loop-range: func() -> result<tuple<f64, f64>, string>;
+
+    /// Set loop range (start, end in beats)
+    set-loop-range: func(start: f64, end: f64) -> result<string, string>;
+}
+
+/// Project and document manipulation
+interface project {
+
+    /// Get all track IDs
+    get-track-ids: func() -> result<list<string>, string>;
+
+    /// Get track by ID (as JSON)
+    get-track: func(track-id: string) -> result<string, string>;
+
+    /// Create a new track
+    create-track: func(track-type: string, name: string) -> result<string, string>;
+
+    /// Delete a track
+    delete-track: func(track-id: string) -> result<string, string>;
+
+    /// Update track (JSON)
+    update-track: func(track-id: string, track-json: string) -> result<string, string>;
+
+    /// Set track volume
+    set-track-volume: func(track-id: string, volume: f32) -> result<string, string>;
+
+    /// Set track pan
+    set-track-pan: func(track-id: string, pan: f32) -> result<string, string>;
+
+    /// Set track mute
+    set-track-mute: func(track-id: string, muted: bool) -> result<string, string>;
+
+    /// Set track solo
+    set-track-solo: func(track-id: string, solo: bool) -> result<string, string>;
+
+    /// Get all clip IDs for a track
+    get-clip-ids: func(track-id: string) -> result<list<string>, string>;
+
+    /// Get clip by ID (as JSON)
+    get-clip: func(clip-id: string) -> result<string, string>;
+
+    /// Create a new clip
+    create-clip: func(track-id: string, clip-json: string) -> result<string, string>;
+
+    /// Delete a clip
+    delete-clip: func(clip-id: string) -> result<string, string>;
+
+    /// Update clip (JSON)
+    update-clip: func(clip-id: string, clip-json: string) -> result<string, string>;
+
+    /// Add effect to track
+    add-effect: func(track-id: string, effect-name: string) -> result<string, string>;
+
+    /// Remove effect from track
+    remove-effect: func(track-id: string, effect-id: string) -> result<string, string>;
+
+    /// Set effect parameter
+    set-effect-param: func(track-id: string, effect-id: string, param-name: string, value: f32) -> result<string, string>;
+
+    /// Set effect mix
+    set-effect-mix: func(track-id: string, effect-id: string, mix: f32) -> result<string, string>;
+
+    /// Get available effects
+    get-available-effects: func() -> result<list<string>, string>;
+
     /// Read audio samples from a sampler node.
     /// Returns channels as separate lists of f32 samples, plus sample rate.
     get-node-audio: func(node-id: string) -> result<tuple<list<list<f32>>, u32>, string>;
+
+    /// Get the currently selected node ID (if any).
+    get-selected-node-id: func() -> result<option<string>, string>;
+
+    // =========================================================================
+    // Document mutation (node graph)
+    // =========================================================================
+
+    /// Add a node to the graph. Returns the new node ID.
+    add-node: func(node-type: string, params-json: string) -> result<string, string>;
+
+    /// Remove a node from the graph
+    remove-node: func(node-id: string) -> result<string, string>;
+
+    /// Get all node IDs in the graph
+    get-node-ids: func() -> result<list<string>, string>;
+
+    /// Get node info as JSON
+    get-node: func(node-id: string) -> result<string, string>;
+
+    /// Set a parameter on a node
+    set-parameter: func(node-id: string, param-name: string, value: string) -> result<string, string>;
+
+    /// Get a parameter value
+    get-parameter: func(node-id: string, param-name: string) -> result<string, string>;
+
+    /// Get connections from a node (JSON)
+    get-connections: func(node-id: string) -> result<string, string>;
 }
 
-/// Storage operations (extension-local persistence)
+/// Storage operations (files, preferences)
 interface storage {
     /// Get value from storage
     get: func(key: string) -> result<string, string>;
@@ -144,6 +675,11 @@ interface storage {
 
     /// Write binary content to a file
     write-bytes: func(path: string, data: list<u8>) -> result<string, string>;
+
+    /// Download a file from URL to extension storage.
+    /// filename is relative to the extension's storage path.
+    /// Returns the full local path of the downloaded file.
+    download-file: func(url: string, filename: string) -> result<string, string>;
 }
 
 /// Network operations (HTTP only)
@@ -160,7 +696,72 @@ interface network {
     http-request: func(request: request) -> result<string, string>;
 }
 
-/// Progress tracking for long-running operations
+/// UI interactions (notifications, dialogs, panels)
+interface ui {
+    /// Notification level
+    enum notify-level {
+        info,
+        warning,
+        error,
+        success,
+    }
+
+    /// Show notification
+    notify: func(message: string, level: notify-level) -> result<string, string>;
+
+    /// Show info notification
+    show-info: func(title: string, message: string) -> result<string, string>;
+
+    /// Show warning notification
+    show-warning: func(title: string, message: string) -> result<string, string>;
+
+    /// Show error notification
+    show-error: func(title: string, message: string) -> result<string, string>;
+
+    /// Show progress notification
+    show-progress: func(title: string, message: string) -> result<string, string>;
+
+    /// Update progress
+    update-progress: func(progress: f32) -> result<string, string>;
+
+    /// Hide progress
+    hide-progress: func() -> result<string, string>;
+
+    /// Show input dialog
+    show-input: func(title: string, placeholder: string) -> result<string, string>;
+
+    /// Show confirmation dialog
+    show-confirm: func(title: string, message: string) -> result<bool, string>;
+}
+
+/// Event system (subscribe, unsubscribe, emit)
+interface events {
+    /// Event types
+    enum event-type {
+        transport-play,
+        transport-stop,
+        transport-pause,
+        transport-record,
+        tempo-change,
+        time-signature-change,
+        document-change,
+        track-add,
+        track-remove,
+        effect-add,
+        effect-remove,
+    }
+
+    /// Subscribe to event
+    subscribe: func(event-type: event-type) -> result<string, string>;
+
+    /// Unsubscribe from event
+    unsubscribe: func(event-type: event-type) -> result<string, string>;
+
+    /// Emit a custom event
+    emit: func(event-name: string, data: string) -> result<string, string>;
+}
+
+/// Progress tracking with handles — for long-running operations
 interface progress {
     /// Show a progress notification, returns a handle ID
     show: func(title: string, cancellable: bool) -> result<string, string>;
@@ -206,6 +807,33 @@ interface extension {
     handle-event: func(event-type: string, data: string) -> result<string, string>;
 }
 
+/// Language adapter — exported by extensions that provide language support.
+///
+/// Language extensions translate between code and the document IR.
+/// `parse` converts code into a list of document changes.
+/// `generate` produces code from the current document state.
+interface language-adapter {
+    use types.{document-change, document-state, metadata-change};
+
+    /// Parse code into document changes
+    parse: func(code: string) -> result<list<document-change>, string>;
+
+    /// Generate code from the current document state
+    generate: func(state: document-state) -> result<string, string>;
+
+    /// Notify the adapter of a document change (for incremental updates)
+    update-for-change: func(change: document-change, state: document-state) -> result<string, string>;
+
+    /// Clear internal caches (e.g., after undo/redo)
+    clear-cache: func();
+
+    /// Take pending metadata changes from the last parse
+    take-metadata-changes: func() -> list<metadata-change>;
+
+    /// Update code for a metadata change
+    update-for-metadata-change: func(change: metadata-change, state: document-state) -> result<string, string>;
+}
+
 /// GPU inference — load models and run inference on the host GPU
 interface gpu {
     /// Check if GPU acceleration is available
@@ -227,12 +855,26 @@ interface gpu {
 
 /// Main world - defines what extensions import and export
 world dawai-extension {
-    import document;
+    // Host APIs (imported by extension)
+    import types;
+    import editor;
+    import transport;
+    import project;
     import storage;
     import network;
+    import ui;
+    import events;
     import progress;
     import panel-ui;
     import gpu;
 
+    // Extension interface (exported by extension)
     export extension;
+}
+
+/// Language extension world — superset of base world with language adapter
+world dawai-language-extension {
+    include dawai-extension;
+
+    export language-adapter;
 }

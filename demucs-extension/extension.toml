@@ -7,6 +7,23 @@ extension_type = "wasm"
 main = "extension.wasm"
 tags = ["ai", "audio", "stems"]
 
+[permissions]
+network = true
+storage = true
+allowed_hosts = ["huggingface.co", "hf.co"]
+
+[[contributes.commands]]
+id = "demucs.download"
+title = "Download HTDemucs Model"
+
+[[contributes.commands]]
+id = "demucs.load"
+title = "Load HTDemucs Model"
+
+[[contributes.commands]]
+id = "demucs.separate"
+title = "Separate Stems"
+
 [[contributes.panels]]
 id = "dawai.demucs"
 name = "Demucs Source Separation"
