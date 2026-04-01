@@ -64,8 +64,7 @@ fn do_download_model() -> Result<String, String> {
     let path = model_path()?;
 
     // Download via host-side streaming download
-    dawai::extension::storage::download_file(MODEL_URL, &path)
-        .map_err(|e| format!("Download failed: {e}"))?;
+    dawai::extension::storage::download_file(MODEL_URL, &path)?;
 
     Ok("Model downloaded".into())
 }
@@ -388,14 +387,13 @@ impl Guest for DemucsExtension {
                     );
 
                     match do_download_model() {
-                        Ok(msg) => notify_info(&msg),
+                        Ok(_) => {}
                         Err(e) => {
                             let _ = dawai::extension::panel_ui::update_widget(
                                 PANEL_ID,
                                 "load_model",
                                 &serde_json::json!({"label": "Download & Load Model", "enabled": true}).to_string(),
                             );
-                            notify_error(&format!("Download failed: {e}"));
                             return Err(e);
                         }
                     }
