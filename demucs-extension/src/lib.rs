@@ -78,23 +78,9 @@ fn do_load(_args: &str) -> Result<String, String> {
 
     notify_info("Loading ONNX model...");
 
-    // Read model bytes from disk
-    let model_bytes = dawai::extension::storage::read_bytes(&path)
-        .map_err(|e| format!("Read model file: {e}"))?;
-
-    if model_bytes.is_empty() {
-        return Err("Model file is empty. Please re-download.".into());
-    }
-
-    notify_info(&format!("Loading {:.1} MB into GPU runtime...", model_bytes.len() as f64 / 1_048_576.0));
-
-    // Load via host GPU API
-    let session_id = dawai::extension::gpu::load_model(
-        "htdemucs",
-        "onnx",
-        &model_bytes,
-    )
-    .map_err(|e| format!("GPU load failed: {e}"))?;
+    // Load directly from file path (no 290MB IPC transfer)
+    let session_id = dawai::extension::gpu::load_model_from_path("htdemucs", &path)
+        .map_err(|e| format!("GPU load failed: {e}"))?;
 
     SESSION_ID.with(|cell| {
         *cell.borrow_mut() = Some(session_id.clone());

@@ -845,6 +845,10 @@ interface gpu {
     /// Returns a session handle.
     load-model: func(model-id: string, format: string, model-bytes: list<u8>) -> result<string, string>;
 
+    /// Load a model from a file path (no bytes transferred over IPC).
+    /// Returns a session handle.
+    load-model-from-path: func(model-id: string, path: string) -> result<string, string>;
+
     /// Unload a model session
     unload-model: func(session-id: string) -> result<string, string>;
 
