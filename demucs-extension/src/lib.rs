@@ -405,15 +405,34 @@ impl Guest for DemucsExtension {
 
             ("separate", "clicked") => {
                 // Get the currently selected node
-                let node_id = dawai::extension::project::get_selected_node_id()
-                    .map_err(|e| format!("Failed to get selection: {e}"))?
-                    .ok_or("No node selected. Select a sampler node first.")?;
+                let node_id = match dawai::extension::project::get_selected_node_id() {
+                    Ok(Some(id)) => id,
+                    Ok(None) => {
+                        notify_error("No node selected. Select a sampler node first.");
+                        return Ok("".into());
+                    }
+                    Err(e) => {
+                        notify_error(&format!("Failed to get selection: {e}"));
+                        return Err(e);
+                    }
+                };
+
+                notify_info(&format!("Separating node {node_id}..."));
 
                 let args = serde_json::json!({
                     "node_id": node_id,
                     "start_time": 0.0,
                 });
-                do_separate(&args.to_string())
+                match do_separate(&args.to_string()) {
+                    Ok(msg) => {
+                        notify_success(&msg);
+                        Ok(msg)
+                    }
+                    Err(e) => {
+                        notify_error(&format!("Separation failed: {e}"));
+                        Err(e)
+                    }
+                }
             }
 
             _ => Ok("".into()),
