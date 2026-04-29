@@ -286,7 +286,7 @@ interface types {
 
     /// Transport change
     variant transport-change {
-        set-tempo(f32),
+        set-tempo(f64),
         set-time-signature(time-signature-change),
         set-loop-range(option<loop-range>),
     }
@@ -431,7 +431,7 @@ interface types {
     record document-state {
         metadata: document-metadata,
         nodes: list<node-entry>,
-        tempo: f32,
+        tempo: f64,
         time-signature: tuple<u32, u32>,
         parameters: list<global-param>,
         drum-kits: list<drum-kit-entry>,
