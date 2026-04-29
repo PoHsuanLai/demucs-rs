@@ -1866,10 +1866,9 @@ dependencies = [
 name = "demucs-extension"
 version = "0.1.0"
 dependencies = [
- "burn",
- "demucs-core",
  "getrandom 0.3.4",
- "pollster",
+ "hound",
+ "rustfft",
  "serde",
  "serde_json",
  "wit-bindgen 0.53.1",
