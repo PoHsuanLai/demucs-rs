@@ -292,8 +292,8 @@ interface types {
     }
 
     record time-signature-change {
-        numerator: u32,
-        denominator: u32,
+        numerator: u8,
+        denominator: u8,
     }
 
     /// Master change
@@ -432,7 +432,7 @@ interface types {
         metadata: document-metadata,
         nodes: list<node-entry>,
         tempo: f64,
-        time-signature: tuple<u32, u32>,
+        time-signature: tuple<u8, u8>,
         parameters: list<global-param>,
         drum-kits: list<drum-kit-entry>,
     }
@@ -524,10 +524,10 @@ interface transport {
     get-state: func() -> result<string, string>;
 
     /// Get time signature (numerator, denominator)
-    get-time-signature: func() -> result<tuple<u32, u32>, string>;
+    get-time-signature: func() -> result<tuple<u8, u8>, string>;
 
     /// Set time signature
-    set-time-signature: func(numerator: u32, denominator: u32) -> result<string, string>;
+    set-time-signature: func(numerator: u8, denominator: u8) -> result<string, string>;
 
     /// Check if loop is enabled
     is-loop-enabled: func() -> result<bool, string>;
