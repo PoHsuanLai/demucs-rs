@@ -13,7 +13,7 @@ fusion = ["burn/fusion"]
 
 [dependencies]
 realfft = "3.5.0"
-burn = { version = "0.20.1" }
+burn = { version = "0.21" }
 safetensors = "0.5"
 half = "2"
 
@@ -21,7 +21,7 @@ half = "2"
 dirs = "5"
 
 [dev-dependencies]
-burn = { version = "0.20.1", features = ["ndarray"] }
+burn = { version = "0.21", features = ["ndarray"] }
 safetensors = "0.5"
 pollster = "0.4"
 bytemuck = "1"
