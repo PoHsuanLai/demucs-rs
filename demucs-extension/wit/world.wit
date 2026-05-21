@@ -10,7 +10,7 @@
 // `node-network`) are gone — extensions emit `track-change` /
 // `bus-change` / `master-change` directly.
 
-package dawai:extension@0.5.0;
+package dawai:extension@0.6.0;
 
 /// Common types used across all interfaces
 interface types {
@@ -406,9 +406,6 @@ interface project {
     /// Delete a track.
     delete-track: func(track-id: string) -> result<string, string>;
 
-    /// Update a track from JSON (full `dawai_document::Track`).
-    update-track: func(track-id: string, track-json: string) -> result<string, string>;
-
     /// Set track volume (linear, conventionally 0..=1).
     set-track-volume: func(track-id: string, volume: f32) -> result<string, string>;
 
@@ -432,9 +429,6 @@ interface project {
 
     /// Delete a clip.
     delete-clip: func(clip-id: string) -> result<string, string>;
-
-    /// Update a clip from JSON.
-    update-clip: func(clip-id: string, clip-json: string) -> result<string, string>;
 
     /// Add a built-in effect by name (e.g. `"reverb"`, `"compressor"`).
     /// Returns the new `effect-id`.
