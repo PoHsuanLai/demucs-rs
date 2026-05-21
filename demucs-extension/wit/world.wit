@@ -10,7 +10,7 @@
 // `node-network`) are gone — extensions emit `track-change` /
 // `bus-change` / `master-change` directly.
 
-package dawai:extension@0.6.0;
+package dawai:extension@0.7.0;
 
 /// Common types used across all interfaces
 interface types {
@@ -542,14 +542,20 @@ interface ui {
     /// Show error notification
     show-error: func(title: string, message: string) -> result<string, string>;
 
-    /// Show a modal dialog described by `spec-json` — a JSON-encoded
+    /// Single-input prompt. Returns the user's entered text, or
+    /// `Err("cancelled")` if dismissed.
+    show-input: func(title: string, default: string) -> result<string, string>;
+
+    /// Yes/no prompt.
+    show-confirm: func(title: string, message: string) -> result<bool, string>;
+
+    /// Pick-from-list prompt. Returns the 0-based index.
+    show-select: func(title: string, options: list<string>) -> result<u32, string>;
+
+    /// Free-form modal described by `spec-json` — a JSON-encoded
     /// `ModalSpec` with `title`, `fields`, and `buttons`. Returns a
-    /// JSON-encoded `ModalAnswer` with `values` (keyed by field id) and
-    /// `button` (the clicked button's value).
-    ///
-    /// Replaces the v0.2.0 `show-input` / `show-confirm` / `show-select`
-    /// triplet — confirms / inputs / selects are all just ModalSpecs
-    /// with different field/button combinations.
+    /// JSON-encoded `ModalAnswer` with `values` (keyed by field id)
+    /// and `button` (the clicked button's value).
     show-modal: func(spec-json: string) -> result<string, string>;
 }
 
