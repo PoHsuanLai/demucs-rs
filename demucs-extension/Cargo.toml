@@ -17,6 +17,12 @@ serde_json = "1"
 # STFT preprocessing for ONNX path
 rustfft = "6"
 
+# Sample-rate conversion. HTDemucs was trained on 44.1 kHz; resample
+# inputs in, stems out, so non-44.1k sources don't come back pitched.
+# Default features off — they pull in `fft_resampler` which needs
+# `realfft` and isn't needed for the sinc path.
+rubato = { version = "0.16", default-features = false }
+
 # WAV writing for stem output
 hound = "3.5"
 

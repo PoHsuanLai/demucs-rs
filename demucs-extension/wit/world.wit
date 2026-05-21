@@ -3,8 +3,14 @@
 // This defines the contract between DAWAI (the host) and extensions (WASM components).
 // Extensions import these interfaces to call into the host, and export the extension interface
 // for the host to call into the extension.
+//
+// v2 reframe: the document model is DAW vocabulary (tracks / clips /
+// effects / buses / master), mirroring `dawai_document::Document`.
+// The pre-v2 node-graph variants (`audio-node`, `node-change`,
+// `node-network`) are gone — extensions emit `track-change` /
+// `bus-change` / `master-change` directly.
 
-package dawai:extension@0.1.0;
+package dawai:extension@0.5.0;
 
 /// Common types used across all interfaces
 interface types {
@@ -17,21 +23,14 @@ interface types {
     }
 
     // =========================================================================
-    // Document IR Types
+    // Document IR Types (v2 — DAW vocabulary)
     // =========================================================================
-    // These types define the complete document model. They are used by the
-    // language-adapter interface and can be used by any extension that
-    // manipulates the document graph.
+    // These types mirror `dawai_document::Document` exactly. Tracks own
+    // their effects, clips, sends, and automation. The audio graph is
+    // private to the host's converter — extensions speak in tracks /
+    // clips / effects, never in raw nodes.
 
-    /// Node value — parameter values for audio nodes
-    variant node-value {
-        float-val(f64),
-        int-val(s64),
-        bool-val(bool),
-        str-val(string),
-    }
-
-    /// Waveform shape for oscillators and LFOs
+    /// Waveform shape for synth oscillators.
     enum waveform {
         sine,
         saw,
@@ -40,33 +39,33 @@ interface types {
         noise,
     }
 
-    /// Clip duration — how long a sampler or sequencer plays
-    variant clip-duration {
-        entire-sample,
-        beats(f64),
-    }
-
-    /// Send routing mode
+    /// Send routing mode.
     enum send-mode {
         pre-fader,
         post-fader,
     }
 
-    /// Sidechain signal tap point
-    enum sidechain-tap-point {
-        pre-fader,
-        post-fader,
-    }
-
-    /// Audio plugin format
+    /// Audio plugin format.
     enum plugin-format {
         vst2,
         vst3,
         clap,
         audio-unit,
+        wasm,
     }
 
-    /// Automation interpolation type
+    /// Track kind — what role the track plays in the mix.
+    enum track-kind {
+        /// Plays back audio clips.
+        audio,
+        /// Drives a synth from MIDI clips / live input.
+        instrument,
+        /// Receives sends; has no source or clips of its own.
+        bus,
+    }
+
+    /// Automation interpolation type — between consecutive envelope
+    /// points. Mirrors `audio_automation::CurveType`.
     enum interpolation-type {
         linear,
         stepped,
@@ -74,51 +73,11 @@ interface types {
         exponential,
     }
 
-    /// Reference to a node's output (for wiring)
-    record node-ref {
-        node-id: string,
-        output-index: u32,
-    }
+    // -----------------------------------------------------------------
+    // MIDI
+    // -----------------------------------------------------------------
 
-    /// A constant value input with optional exposure
-    record value-input {
-        value: node-value,
-        exposed: bool,
-    }
-
-    /// Node input — where a parameter gets its value
-    variant node-input {
-        node(node-ref),
-        value(value-input),
-        scope(string),
-    }
-
-    /// Key-value pair for node parameters (HashMap<String, NodeInput>)
-    record param-entry {
-        name: string,
-        input: node-input,
-    }
-
-    /// Modulation target
-    record mod-target {
-        target-node-id: string,
-        parameter-name: string,
-        depth: f64,
-    }
-
-    /// Automation curve point
-    record automation-point {
-        time: f64,
-        value: f64,
-    }
-
-    /// Automation curve (points + interpolation)
-    record automation-curve {
-        points: list<automation-point>,
-        interpolation: interpolation-type,
-    }
-
-    /// MIDI note event
+    /// One note in a MIDI clip. Beat-relative timing.
     record midi-note {
         note: u8,
         velocity: u8,
@@ -126,363 +85,249 @@ interface types {
         duration: f64,
     }
 
-    /// Poly synth configuration
-    record poly-synth-config {
-        waveform: waveform,
-        polyphony: u8,
-    }
+    // -----------------------------------------------------------------
+    // Synth (instrument source)
+    // -----------------------------------------------------------------
 
-    /// Generator type (oscillator, LFO, neural, poly synth)
-    variant generator-type {
-        oscillator(waveform),
-        lfo(waveform),
-        neural(string),
+    /// Configuration for a typed synth source. Mirrors `dawai_document::Synth`.
+    variant synth {
         poly-synth(poly-synth-config),
     }
 
-    /// Modulator type
-    variant modulator-type {
-        envelope,
-        automation(automation-curve),
+    record poly-synth-config {
+        waveform: waveform,
+        polyphony: u8,
+        attack: f32,
+        decay: f32,
+        sustain: f32,
+        release: f32,
+        filter-cutoff: f32,
+        filter-resonance: f32,
     }
 
-    /// Audio node — a node in the DSP graph
-    variant audio-node {
-        generator(generator-node),
-        sampler(sampler-node),
-        audio-input(audio-input-node),
-        midi-input(midi-input-node),
-        midi-sequencer(midi-sequencer-node),
-        effect(effect-node),
-        volume-control(volume-control-node),
-        modulator(modulator-node),
-        send(send-node),
-        return-bus(return-node),
-        sidechain(sidechain-node),
-        plugin-instance(plugin-instance-node),
+    /// What feeds the head of a track's effect chain. Mirrors
+    /// `dawai_document::TrackSource`.
+    variant track-source {
+        none,
+        synth(synth),
+        audio-input(audio-input-source),
+        midi-input(midi-input-source),
     }
 
-    record generator-node {
-        generator-type: generator-type,
-        params: list<param-entry>,
-    }
-
-    record sampler-node {
-        sample-path: string,
-        playback-rate: node-input,
-        loop-enabled: bool,
-        loop-start: node-input,
-        loop-end: node-input,
-        start-time: f64,
-        duration: clip-duration,
-    }
-
-    record audio-input-node {
+    record audio-input-source {
         device-index: u32,
         channel: u32,
     }
 
-    record midi-input-node {
+    record midi-input-source {
         device-index: u32,
+        /// `none` = listen on all channels.
         channel: option<u8>,
     }
 
-    record midi-sequencer-node {
-        notes: list<midi-note>,
+    // -----------------------------------------------------------------
+    // Clip
+    // -----------------------------------------------------------------
+
+    /// Timeline placement — where a clip lives on the timeline.
+    /// `length-beats == 0.0` is the "not yet resolved" sentinel used
+    /// transiently between import and the duration probe completing.
+    record timeline-placement {
         start-time: f64,
-        duration: clip-duration,
+        length-beats: f64,
+    }
+
+    /// Audio or MIDI clip body. Mirrors `dawai_document::ClipKind`.
+    variant clip-kind {
+        audio(audio-clip),
+        midi(midi-clip),
+    }
+
+    record audio-clip {
+        sample-path: string,
+        playback-rate: f32,
+        loop-enabled: bool,
+        loop-start: f32,
+        loop-end: f32,
+    }
+
+    record midi-clip {
+        notes: list<midi-note>,
         loop-enabled: bool,
     }
 
-    record effect-node {
-        effect-name: string,
-        params: list<param-entry>,
+    record clip {
+        name: string,
+        placement: timeline-placement,
+        kind: clip-kind,
     }
 
-    record volume-control-node {
-        volume: node-input,
-        pan: node-input,
-        input: option<node-input>,
+    /// `clip-id → clip` entry. WIT lacks ordered maps so tracks carry a
+    /// list of these and the host preserves order.
+    record clip-entry {
+        id: string,
+        clip: clip,
     }
 
-    record modulator-node {
-        modulator-type: modulator-type,
-        params: list<param-entry>,
-        output-target: mod-target,
+    // -----------------------------------------------------------------
+    // Effects
+    // -----------------------------------------------------------------
+
+    /// Plugin-specific param value (used for `effect-kind::plugin`).
+    record plugin-param-entry {
+        name: string,
+        value: f32,
     }
 
-    record send-node {
-        return-bus-id: string,
-        level: node-input,
+    /// Built-ins are typed exhaustively (the host owns the converter
+    /// and the parameter shapes are known). Plugin keeps string-keyed
+    /// params because the plugin owns the param set.
+    /// Mirrors `dawai_document::EffectKind`.
+    variant effect-kind {
+        // --- Filters / EQ ---
+        lowpass(filter-params),
+        highpass(filter-params),
+        bandpass(filter-params),
+        notch(filter-params),
+        peak(filter-params),
+        allpass(filter-params),
+        bell(bell-params),
+        low-shelf(bell-params),
+        high-shelf(bell-params),
+        moog(filter-params),
+        // --- Time-domain ---
+        reverb(reverb-params),
+        delay(delay-params),
+        chorus(chorus-params),
+        // --- Dynamics ---
+        compressor(compressor-params),
+        // --- Hosted ---
+        plugin(plugin-params),
+    }
+
+    record filter-params {
+        cutoff: f32,
+        q: f32,
+    }
+
+    record bell-params {
+        frequency: f32,
+        q: f32,
+        gain: f32,
+    }
+
+    record reverb-params {
+        room-size: f32,
+        damping: f32,
+        wet: f32,
+    }
+
+    record delay-params {
+        time-beats: f32,
+        feedback: f32,
+        wet: f32,
+    }
+
+    record chorus-params {
+        separation: f32,
+        variation: f32,
+        mod-frequency: f32,
+    }
+
+    record compressor-params {
+        threshold: f32,
+        ratio: f32,
+        attack: f32,
+        release: f32,
+    }
+
+    record plugin-params {
+        plugin-path: string,
+        format: plugin-format,
+        /// Opaque preset blob the plugin defines.
+        state: option<list<u8>>,
+        parameters: list<plugin-param-entry>,
+    }
+
+    record effect {
+        /// Stable id; survives reorder/removal so automation lanes can
+        /// keep targeting it.
+        id: string,
+        bypassed: bool,
+        /// Source track for sidechain input. Honored only by effects
+        /// that support it (compressor, gate); silently ignored otherwise.
+        sidechain: option<string>,
+        kind: effect-kind,
+    }
+
+    // -----------------------------------------------------------------
+    // Sends
+    // -----------------------------------------------------------------
+
+    record send {
+        /// Target bus id (stringified UUID).
+        target: string,
+        level: f32,
         mode: send-mode,
     }
 
-    record return-node {
-        bus-index: u32,
+    // -----------------------------------------------------------------
+    // Automation
+    // -----------------------------------------------------------------
+
+    /// One point on an automation envelope. Mirrors
+    /// `audio_automation::Point<f32>`.
+    record automation-point {
+        time: f64,
+        value: f32,
+        /// Curve type to the next point.
+        curve-type: interpolation-type,
     }
 
-    record sidechain-node {
-        source-node-id: string,
-        tap-point: sidechain-tap-point,
+    /// Full envelope on a track-level automation lane.
+    record automation-envelope {
+        points: list<automation-point>,
+        enabled: bool,
+        min-value: option<f32>,
+        max-value: option<f32>,
+        step-size: option<f32>,
     }
 
-    record plugin-instance-node {
-        plugin-path: string,
-        format: plugin-format,
-        state: option<list<u8>>,
-        params: list<param-entry>,
+    /// What an automation lane writes into. Mirrors
+    /// `dawai_document::AutomationTarget`.
+    variant automation-target {
+        track-volume,
+        track-pan,
+        send-level(u32),
+        effect-param(effect-param-target),
+        synth-param(string),
     }
 
-    /// Node change — mutation to the DSP graph
-    variant node-change {
-        add-node(add-node-change),
-        remove-node(remove-node-change),
-        connect-nodes(connect-nodes-change),
-        disconnect-nodes(disconnect-nodes-change),
-        set-parameter(set-parameter-change),
-        replace-node(replace-node-change),
+    record effect-param-target {
+        effect-id: string,
+        param: string,
     }
 
-    record add-node-change {
-        node-id: string,
-        node: audio-node,
-        position: option<tuple<f32, f32>>,
+    record automation-lane {
+        target: automation-target,
+        envelope: automation-envelope,
+        enabled: bool,
     }
 
-    record remove-node-change {
-        node-id: string,
+    // -----------------------------------------------------------------
+    // Track / Bus / Master
+    // -----------------------------------------------------------------
+
+    record color-rgb {
+        r: u8,
+        g: u8,
+        b: u8,
     }
 
-    record connect-nodes-change {
-        source-node-id: string,
-        source-output: u32,
-        dest-node-id: string,
-        dest-input: u32,
-    }
-
-    record disconnect-nodes-change {
-        source-node-id: string,
-        source-output: u32,
-        dest-node-id: string,
-        dest-input: u32,
-    }
-
-    record set-parameter-change {
-        node-id: string,
-        parameter-name: string,
-        value: node-value,
-    }
-
-    record replace-node-change {
-        node-id: string,
-        new-node: audio-node,
-    }
-
-    /// Loop range
     record loop-range {
         start: f64,
         end: f64,
     }
-
-    /// Transport change
-    variant transport-change {
-        set-tempo(f64),
-        set-time-signature(time-signature-change),
-        set-loop-range(option<loop-range>),
-    }
-
-    record time-signature-change {
-        numerator: u8,
-        denominator: u8,
-    }
-
-    /// Master change
-    variant master-change {
-        set-volume(f32),
-        set-pan(f32),
-    }
-
-    // =========================================================================
-    // Marker and Region Types
-    // =========================================================================
-
-    /// Unique marker ID
-    type marker-id = string;
-
-    /// Unique region ID
-    type region-id = string;
-
-    /// Timeline marker
-    record marker {
-        id: marker-id,
-        name: string,
-        position: f64,
-        color: option<string>,
-    }
-
-    /// Timeline region (start/end range with name)
-    record region {
-        id: region-id,
-        name: string,
-        start: f64,
-        end: f64,
-        color: option<string>,
-    }
-
-    // =========================================================================
-    // Automation Envelope Types
-    // =========================================================================
-
-    /// Automation envelope point
-    record automation-envelope-point {
-        time: f64,
-        value: f32,
-        curve-type: interpolation-type,
-    }
-
-    /// Automation envelope (parameter automation over time)
-    record automation-envelope {
-        points: list<automation-envelope-point>,
-    }
-
-    /// Document change — top-level mutation type
-    variant document-change {
-        node(node-change),
-        transport(transport-change),
-        master(master-change),
-        automation(automation-change),
-        metadata(metadata-change),
-    }
-
-    /// Automation change — timeline automation for node parameters
-    variant automation-change {
-        set-envelope(set-envelope-change),
-        remove-envelope(remove-envelope-change),
-        clear-node(clear-automation-node-change),
-    }
-
-    record set-envelope-change {
-        node-id: string,
-        parameter-name: string,
-        envelope: automation-envelope,
-    }
-
-    record remove-envelope-change {
-        node-id: string,
-        parameter-name: string,
-    }
-
-    record clear-automation-node-change {
-        node-id: string,
-    }
-
-    /// Metadata change — UI/project state (not musical content)
-    variant metadata-change {
-        add-marker(marker),
-        update-marker(marker),
-        remove-marker(marker-id),
-        add-region(region),
-        update-region(region),
-        remove-region(region-id),
-        set-loop-to-region(region-id),
-    }
-
-    // =========================================================================
-    // Document State (for code generation)
-    // =========================================================================
-
-    /// Document metadata
-    record document-metadata {
-        title: string,
-        author: string,
-        version: string,
-    }
-
-    /// Node network entry (node-id → audio-node)
-    record node-entry {
-        node-id: string,
-        node: audio-node,
-    }
-
-    /// Drum kit definition
-    record drum-kit {
-        name: string,
-        samples: list<drum-kit-sample>,
-    }
-
-    record drum-kit-sample {
-        key: string,
-        path: string,
-    }
-
-    /// Global parameter entry
-    record global-param {
-        name: string,
-        value: f32,
-    }
-
-    /// Drum kit entry
-    record drum-kit-entry {
-        name: string,
-        kit: drum-kit,
-    }
-
-    /// Full document state — passed to generate()
-    record document-state {
-        metadata: document-metadata,
-        nodes: list<node-entry>,
-        tempo: f64,
-        time-signature: tuple<u8, u8>,
-        parameters: list<global-param>,
-        drum-kits: list<drum-kit-entry>,
-    }
-}
-
-/// Code editor manipulation
-interface editor {
-    use types.{text-range};
-
-    /// Get the entire editor text
-    get-text: func() -> result<string, string>;
-
-    /// Get the current selection range
-    get-selection: func() -> text-range;
-
-    /// Get the selected text
-    get-selected-text: func() -> result<string, string>;
-
-    /// Insert text at cursor
-    insert-text: func(text: string) -> result<string, string>;
-
-    /// Replace text in a range
-    replace-text: func(range: text-range, text: string) -> result<string, string>;
-
-    /// Replace current selection with text
-    replace-selection: func(text: string) -> result<string, string>;
-
-    /// Replace text in a specific range
-    replace-range: func(range: text-range, text: string) -> result<string, string>;
-
-    /// Set selection range
-    set-selection: func(range: text-range) -> result<string, string>;
-
-    /// Get cursor position
-    get-cursor-position: func() -> text-range;
-
-    /// Set cursor position
-    set-cursor-position: func(line: u32, column: u32) -> result<string, string>;
-
-    /// Begin an undo group
-    begin-undo-group: func(label: string) -> result<string, string>;
-
-    /// End an undo group
-    end-undo-group: func() -> result<string, string>;
-
-    /// Undo last change
-    undo: func() -> result<string, string>;
-
-    /// Redo last undone change
-    redo: func() -> result<string, string>;
 }
 
 /// Transport control (play, stop, record, tempo)
@@ -542,97 +387,82 @@ interface transport {
     set-loop-range: func(start: f64, end: f64) -> result<string, string>;
 }
 
-/// Project and document manipulation
+/// Project and document manipulation (track / clip / effect CRUD).
+///
+/// All ids are stringified UUIDs. JSON payloads serialize the v2 doc
+/// types from `dawai_document` (track / clip / effect).
 interface project {
 
-    /// Get all track IDs
+    /// Get all track IDs in document order.
     get-track-ids: func() -> result<list<string>, string>;
 
-    /// Get track by ID (as JSON)
+    /// Get a track by id (as JSON encoding `dawai_document::Track`).
     get-track: func(track-id: string) -> result<string, string>;
 
-    /// Create a new track
-    create-track: func(track-type: string, name: string) -> result<string, string>;
+    /// Create a new track. `track-kind` is `"audio"` / `"instrument"` /
+    /// `"bus"`. Returns the new track id.
+    create-track: func(track-kind: string, name: string) -> result<string, string>;
 
-    /// Delete a track
+    /// Delete a track.
     delete-track: func(track-id: string) -> result<string, string>;
 
-    /// Update track (JSON)
+    /// Update a track from JSON (full `dawai_document::Track`).
     update-track: func(track-id: string, track-json: string) -> result<string, string>;
 
-    /// Set track volume
+    /// Set track volume (linear, conventionally 0..=1).
     set-track-volume: func(track-id: string, volume: f32) -> result<string, string>;
 
-    /// Set track pan
+    /// Set track pan (-1..=1).
     set-track-pan: func(track-id: string, pan: f32) -> result<string, string>;
 
-    /// Set track mute
+    /// Set track mute.
     set-track-mute: func(track-id: string, muted: bool) -> result<string, string>;
 
-    /// Set track solo
+    /// Set track solo.
     set-track-solo: func(track-id: string, solo: bool) -> result<string, string>;
 
-    /// Get all clip IDs for a track
+    /// Get all clip IDs for a track in document order.
     get-clip-ids: func(track-id: string) -> result<list<string>, string>;
 
-    /// Get clip by ID (as JSON)
+    /// Get a clip by id (as JSON encoding `dawai_document::Clip`).
     get-clip: func(clip-id: string) -> result<string, string>;
 
-    /// Create a new clip
+    /// Create a clip on a track from JSON (`dawai_document::Clip`).
     create-clip: func(track-id: string, clip-json: string) -> result<string, string>;
 
-    /// Delete a clip
+    /// Delete a clip.
     delete-clip: func(clip-id: string) -> result<string, string>;
 
-    /// Update clip (JSON)
+    /// Update a clip from JSON.
     update-clip: func(clip-id: string, clip-json: string) -> result<string, string>;
 
-    /// Add effect to track
+    /// Add a built-in effect by name (e.g. `"reverb"`, `"compressor"`).
+    /// Returns the new `effect-id`.
     add-effect: func(track-id: string, effect-name: string) -> result<string, string>;
 
-    /// Remove effect from track
+    /// Remove an effect from a track.
     remove-effect: func(track-id: string, effect-id: string) -> result<string, string>;
 
-    /// Set effect parameter
-    set-effect-param: func(track-id: string, effect-id: string, param-name: string, value: f32) -> result<string, string>;
+    /// Set a single typed parameter on an effect (e.g. `"cutoff"`,
+    /// `"wet"`). The host knows the param shape from `effect-kind`.
+    set-effect-param: func(track-id: string, effect-id: string,
+                           param-name: string, value: f32) -> result<string, string>;
 
-    /// Set effect mix
+    /// Convenience: set the wet/dry mix of a built-in effect that
+    /// exposes one (reverb, delay, chorus). Equivalent to
+    /// `set-effect-param(_, _, "wet", mix)`.
     set-effect-mix: func(track-id: string, effect-id: string, mix: f32) -> result<string, string>;
 
-    /// Get available effects
+    /// List effect kinds the host knows how to instantiate.
     get-available-effects: func() -> result<list<string>, string>;
 
-    /// Read audio samples from a sampler node.
-    /// Returns channels as separate lists of f32 samples, plus sample rate.
-    get-node-audio: func(node-id: string) -> result<tuple<list<list<f32>>, u32>, string>;
+    /// Read raw audio samples from the audio source feeding a track
+    /// (sampler / audio input). Returns `(channels, sample-rate)`.
+    /// Errors if the track has no audio source.
+    get-track-audio: func(track-id: string) -> result<tuple<list<list<f32>>, u32>, string>;
 
-    /// Get the currently selected node ID (if any).
-    get-selected-node-id: func() -> result<option<string>, string>;
-
-    // =========================================================================
-    // Document mutation (node graph)
-    // =========================================================================
-
-    /// Add a node to the graph. Returns the new node ID.
-    add-node: func(node-type: string, params-json: string) -> result<string, string>;
-
-    /// Remove a node from the graph
-    remove-node: func(node-id: string) -> result<string, string>;
-
-    /// Get all node IDs in the graph
-    get-node-ids: func() -> result<list<string>, string>;
-
-    /// Get node info as JSON
-    get-node: func(node-id: string) -> result<string, string>;
-
-    /// Set a parameter on a node
-    set-parameter: func(node-id: string, param-name: string, value: string) -> result<string, string>;
-
-    /// Get a parameter value
-    get-parameter: func(node-id: string, param-name: string) -> result<string, string>;
-
-    /// Get connections from a node (JSON)
-    get-connections: func(node-id: string) -> result<string, string>;
+    /// Currently-selected track in the UI, if any.
+    get-selected-track-id: func() -> result<option<string>, string>;
 }
 
 /// Storage operations (files, preferences)
@@ -718,47 +548,15 @@ interface ui {
     /// Show error notification
     show-error: func(title: string, message: string) -> result<string, string>;
 
-    /// Show progress notification
-    show-progress: func(title: string, message: string) -> result<string, string>;
-
-    /// Update progress
-    update-progress: func(progress: f32) -> result<string, string>;
-
-    /// Hide progress
-    hide-progress: func() -> result<string, string>;
-
-    /// Show input dialog
-    show-input: func(title: string, placeholder: string) -> result<string, string>;
-
-    /// Show confirmation dialog
-    show-confirm: func(title: string, message: string) -> result<bool, string>;
-}
-
-/// Event system (subscribe, unsubscribe, emit)
-interface events {
-    /// Event types
-    enum event-type {
-        transport-play,
-        transport-stop,
-        transport-pause,
-        transport-record,
-        tempo-change,
-        time-signature-change,
-        document-change,
-        track-add,
-        track-remove,
-        effect-add,
-        effect-remove,
-    }
-
-    /// Subscribe to event
-    subscribe: func(event-type: event-type) -> result<string, string>;
-
-    /// Unsubscribe from event
-    unsubscribe: func(event-type: event-type) -> result<string, string>;
-
-    /// Emit a custom event
-    emit: func(event-name: string, data: string) -> result<string, string>;
+    /// Show a modal dialog described by `spec-json` — a JSON-encoded
+    /// `ModalSpec` with `title`, `fields`, and `buttons`. Returns a
+    /// JSON-encoded `ModalAnswer` with `values` (keyed by field id) and
+    /// `button` (the clicked button's value).
+    ///
+    /// Replaces the v0.2.0 `show-input` / `show-confirm` / `show-select`
+    /// triplet — confirms / inputs / selects are all just ModalSpecs
+    /// with different field/button combinations.
+    show-modal: func(spec-json: string) -> result<string, string>;
 }
 
 /// Progress tracking with handles — for long-running operations
@@ -809,51 +607,178 @@ interface extension {
 
 /// Language adapter — exported by extensions that provide language support.
 ///
-/// Language extensions translate between code and the document IR.
-/// `parse` converts code into a list of document changes.
-/// `generate` produces code from the current document state.
+/// v0.3.0: extensions write document state by calling document-* host
+/// imports during `parse`, and read it back during `regenerate`. The
+/// host drains queued changes after `parse` returns and writes them
+/// as a single ApplyOps event.
 interface language-adapter {
-    use types.{document-change, document-state, metadata-change};
-
-    /// Parse code into document changes
-    parse: func(code: string) -> result<list<document-change>, string>;
-
-    /// Generate code from the current document state
-    generate: func(state: document-state) -> result<string, string>;
-
-    /// Notify the adapter of a document change (for incremental updates)
-    update-for-change: func(change: document-change, state: document-state) -> result<string, string>;
-
-    /// Clear internal caches (e.g., after undo/redo)
+    parse: func(code: string) -> result<_, string>;
+    regenerate: func() -> result<string, string>;
     clear-cache: func();
-
-    /// Take pending metadata changes from the last parse
-    take-metadata-changes: func() -> list<metadata-change>;
-
-    /// Update code for a metadata change
-    update-for-metadata-change: func(change: metadata-change, state: document-state) -> result<string, string>;
 }
 
-/// GPU inference — load models and run inference on the host GPU
+// v0.3.0 document-write / document-read.
+
+interface document-track {
+    use types.{track-kind, track-source, color-rgb, clip-entry, effect, send};
+
+    record add-track-payload {
+        name: string,
+        kind: track-kind,
+        source: track-source,
+        clips: list<clip-entry>,
+        effects: list<effect>,
+        sends: list<send>,
+        volume: option<f32>,
+        pan: option<f32>,
+        muted: option<bool>,
+        soloed: option<bool>,
+        color: option<color-rgb>,
+        index: option<u32>,
+    }
+
+    add-track: func(payload: add-track-payload) -> result<string, string>;
+    remove-track: func(id: string) -> result<_, string>;
+    rename-track: func(id: string, name: string) -> result<_, string>;
+    set-volume: func(id: string, value: f32) -> result<_, string>;
+    set-pan: func(id: string, value: f32) -> result<_, string>;
+    set-mute: func(id: string, value: bool) -> result<_, string>;
+    set-solo: func(id: string, value: bool) -> result<_, string>;
+    set-color: func(id: string, value: option<color-rgb>) -> result<_, string>;
+    set-source: func(id: string, source: track-source) -> result<_, string>;
+}
+
+interface document-bus {
+    use types.{color-rgb, effect, send};
+
+    record add-bus-payload {
+        name: string,
+        effects: list<effect>,
+        sends: list<send>,
+        volume: option<f32>,
+        pan: option<f32>,
+        feeds-master: option<bool>,
+        index: option<u32>,
+    }
+
+    add-bus: func(payload: add-bus-payload) -> result<string, string>;
+    remove-bus: func(id: string) -> result<_, string>;
+    rename-bus: func(id: string, name: string) -> result<_, string>;
+    set-volume: func(id: string, value: f32) -> result<_, string>;
+    set-pan: func(id: string, value: f32) -> result<_, string>;
+    set-feeds-master: func(id: string, value: bool) -> result<_, string>;
+}
+
+interface document-master {
+    set-volume: func(value: f32) -> result<_, string>;
+    set-pan: func(value: f32) -> result<_, string>;
+}
+
+interface document-clip {
+    use types.{clip-kind, timeline-placement, midi-note};
+
+    record add-clip-payload {
+        track: string,
+        name: string,
+        placement: timeline-placement,
+        kind: clip-kind,
+    }
+
+    add-clip: func(payload: add-clip-payload) -> result<string, string>;
+    remove-clip: func(track: string, id: string) -> result<_, string>;
+    move-clip: func(track: string, id: string, placement: timeline-placement) -> result<_, string>;
+    replace-notes: func(track: string, id: string, notes: list<midi-note>) -> result<_, string>;
+}
+
+interface document-effect {
+    use types.{effect-kind};
+
+    variant effect-parent {
+        track(string),
+        bus(string),
+        master,
+    }
+
+    record add-effect-payload {
+        parent: effect-parent,
+        index: u32,
+        bypassed: bool,
+        sidechain: option<string>,
+        kind: effect-kind,
+    }
+
+    add-effect: func(payload: add-effect-payload) -> result<string, string>;
+    remove-effect: func(parent: effect-parent, id: string) -> result<_, string>;
+    reorder-effect: func(parent: effect-parent, from-index: u32, to-index: u32) -> result<_, string>;
+    set-bypass: func(parent: effect-parent, id: string, value: bool) -> result<_, string>;
+    set-param: func(parent: effect-parent, id: string, param: string, value: f32) -> result<_, string>;
+    set-sidechain: func(parent: effect-parent, id: string, source: option<string>) -> result<_, string>;
+}
+
+interface document-send {
+    use types.{send-mode};
+
+    record add-send-payload {
+        track: string,
+        target: string,
+        level: f32,
+        mode: send-mode,
+    }
+
+    add-send: func(payload: add-send-payload) -> result<_, string>;
+    remove-send: func(track: string, index: u32) -> result<_, string>;
+    set-level: func(track: string, index: u32, level: f32) -> result<_, string>;
+}
+
+interface document-transport {
+    use types.{loop-range};
+
+    set-tempo: func(bpm: f64) -> result<_, string>;
+    set-time-signature: func(numerator: u32, denominator: u32) -> result<_, string>;
+    set-loop-enabled: func(enabled: bool) -> result<_, string>;
+    set-loop-range: func(range: loop-range) -> result<_, string>;
+}
+
+interface document-read {
+    use types.{track-kind, color-rgb};
+
+    record track-info {
+        id: string,
+        name: string,
+        kind: track-kind,
+        volume: f32,
+        pan: f32,
+        muted: bool,
+        soloed: bool,
+        color: option<color-rgb>,
+    }
+
+    list-track-ids: func() -> list<string>;
+    get-track: func(id: string) -> option<track-info>;
+    get-tempo: func() -> f64;
+    is-playing: func() -> bool;
+}
+
+/// GPU inference — load ONNX models and run inference on the host.
+///
+/// Models live on disk under the extension's sandboxed storage root
+/// (see the `storage` interface). To load a model that arrived over
+/// the network, write it via `storage.download-file` first, then pass
+/// the relative path here.
 interface gpu {
-    /// Check if GPU acceleration is available
-    has-gpu: func() -> result<bool, string>;
+    /// Load an ONNX model from a file path under the extension's
+    /// storage root. Same sandbox rules as `storage::*` — relative
+    /// path, no `..`, resolved against the storage dir. Returns a
+    /// session handle good until `unload-model` or component teardown.
+    load-model: func(path: string) -> result<string, string>;
 
-    /// Load a model from bytes.
-    /// format: "onnx"
-    /// model-id: identifier for this model session
-    /// Returns a session handle.
-    load-model: func(model-id: string, format: string, model-bytes: list<u8>) -> result<string, string>;
-
-    /// Load a model from a file path (no bytes transferred over IPC).
-    /// Returns a session handle.
-    load-model-from-path: func(model-id: string, path: string) -> result<string, string>;
-
-    /// Unload a model session
+    /// Drop a session and free its ORT resources.
     unload-model: func(session-id: string) -> result<string, string>;
 
     /// Run inference. Inputs/outputs are named tensors as JSON:
-    /// { "input_name": { "shape": [1, 2, 343980], "data": [...] } }
+    /// `{ "input_name": { "shape": [1, 2, 343980], "data": [...] } }`.
+    /// Outputs come back keyed as `"output_0"`, `"output_1"`, … in
+    /// declaration order.
     run: func(session-id: string, inputs-json: string) -> result<string, string>;
 }
 
@@ -861,16 +786,22 @@ interface gpu {
 world dawai-extension {
     // Host APIs (imported by extension)
     import types;
-    import editor;
     import transport;
     import project;
     import storage;
     import network;
     import ui;
-    import events;
     import progress;
     import panel-ui;
     import gpu;
+    import document-track;
+    import document-bus;
+    import document-master;
+    import document-clip;
+    import document-effect;
+    import document-send;
+    import document-transport;
+    import document-read;
 
     // Extension interface (exported by extension)
     export extension;

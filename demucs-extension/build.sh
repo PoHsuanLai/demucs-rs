@@ -20,9 +20,12 @@ if [ ! -f "$ADAPTER" ]; then
     curl -sL "$ADAPTER_URL" -o "$ADAPTER"
 fi
 
-# 3. Componentize with adapter
-# Target dir is at the workspace root (extensions/demucs-rs/target/)
-CORE="$SCRIPT_DIR/../target/wasm32-wasip1/release/demucs_extension.wasm"
+# 3. Componentize with adapter.
+# `cargo metadata` resolves the target dir wherever the user has it
+# pointed (default $WORKSPACE/target or via CARGO_TARGET_DIR /
+# `~/.cargo/config.toml`'s `[build] target-dir`).
+TARGET_DIR="$(cargo metadata --manifest-path "$SCRIPT_DIR/Cargo.toml" --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')"
+CORE="$TARGET_DIR/wasm32-wasip1/release/demucs_extension.wasm"
 OUT="$SCRIPT_DIR/extension.wasm"
 echo "Componentizing..."
 wasm-tools component new "$CORE" --adapt "wasi_snapshot_preview1=$ADAPTER" -o "$OUT"

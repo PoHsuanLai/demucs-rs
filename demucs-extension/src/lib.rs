@@ -25,6 +25,54 @@ struct TensorJson {
 const MODEL_URL: &str =
     "https://huggingface.co/smank/htdemucs-onnx/resolve/main/htdemucs.onnx";
 
+/// HTDemucs was trained on 44.1 kHz audio. Inputs at any other rate
+/// get resampled to this before chunking; stems get resampled back out
+/// so they line up with the original at its native rate.
+const MODEL_SAMPLE_RATE: u32 = 44_100;
+
+/// Relative path (under the extension's sandboxed storage root) where
+/// the ONNX model is downloaded to and loaded from.
+const MODEL_PATH: &str = "htdemucs.onnx";
+
+/// Sinc-resample one channel of f32 PCM. Pass-through if `from_sr ==
+/// to_sr`. Uses `rubato::SincFixedIn` with the high-quality preset —
+/// 256-tap kernel, cubic interpolation. ~10–20× slower than linear,
+/// but a separation pass is already minutes; the resample cost is
+/// negligible and the spectral artifacts of a cheaper filter would
+/// leak into the separation.
+fn resample(input: &[f32], from_sr: u32, to_sr: u32) -> Result<Vec<f32>, String> {
+    use rubato::{Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction};
+
+    if from_sr == to_sr || input.is_empty() {
+        return Ok(input.to_vec());
+    }
+
+    let params = SincInterpolationParameters {
+        sinc_len: 256,
+        f_cutoff: 0.95,
+        interpolation: SincInterpolationType::Cubic,
+        oversampling_factor: 256,
+        window: WindowFunction::BlackmanHarris2,
+    };
+    let mut resampler = SincFixedIn::<f32>::new(
+        to_sr as f64 / from_sr as f64,
+        2.0,
+        params,
+        input.len(),
+        1,
+    )
+    .map_err(|e| format!("rubato init ({from_sr} -> {to_sr}): {e}"))?;
+
+    let waves_in = vec![input.to_vec()];
+    let waves_out = resampler
+        .process(&waves_in, None)
+        .map_err(|e| format!("rubato process: {e}"))?;
+    waves_out
+        .into_iter()
+        .next()
+        .ok_or_else(|| "rubato produced no output channels".to_string())
+}
+
 /// Panel ID (must match extension.toml)
 const PANEL_ID: &str = "dawai.demucs";
 
@@ -37,20 +85,9 @@ thread_local! {
 // Commands
 // =============================================================================
 
-/// Get the on-disk path for the ONNX model.
-fn model_path() -> Result<String, String> {
-    let storage_path = dawai::extension::storage::get_storage_path()
-        .unwrap_or_else(|_| ".".into());
-    Ok(format!("{storage_path}/htdemucs.onnx"))
-}
-
 /// Check if the model file exists on disk.
 fn model_exists() -> bool {
-    let path = match model_path() {
-        Ok(p) => p,
-        Err(_) => return false,
-    };
-    dawai::extension::storage::file_exists(&path)
+    dawai::extension::storage::file_exists(MODEL_PATH)
         .unwrap_or_else(|_| "false".into()) == "true"
 }
 
@@ -61,25 +98,25 @@ fn do_download_model() -> Result<String, String> {
 
     notify_info("Downloading HTDemucs model (~290 MB)...");
 
-    let path = model_path()?;
-
-    // Download via host-side streaming download
-    dawai::extension::storage::download_file(MODEL_URL, &path)?;
+    // download_file resolves `filename` against the extension's
+    // sandboxed storage root — pass a relative name.
+    dawai::extension::storage::download_file(MODEL_URL, MODEL_PATH)?;
 
     Ok("Model downloaded".into())
 }
 
 fn do_load(_args: &str) -> Result<String, String> {
-    let path = model_path()?;
-
     if !model_exists() {
         return Err("Model file not found. Please download first.".into());
     }
 
     notify_info("Loading ONNX model...");
 
-    // Load directly from file path (no 290MB IPC transfer)
-    let session_id = dawai::extension::gpu::load_model_from_path("htdemucs", &path)
+    // load-model takes a sandboxed relative path under the extension's
+    // storage root — same rules as the storage interface. The actual
+    // load happens on Bevy's IoTaskPool; this returns immediately with
+    // a handle. `run()` later waits for the asset to finish loading.
+    let session_id = dawai::extension::gpu::load_model(MODEL_PATH)
         .map_err(|e| format!("GPU load failed: {e}"))?;
 
     SESSION_ID.with(|cell| {
@@ -106,9 +143,9 @@ fn do_load(_args: &str) -> Result<String, String> {
 fn do_separate(args: &str) -> Result<String, String> {
     let parsed: serde_json::Value = serde_json::from_str(args)
         .map_err(|e| format!("Invalid args JSON: {e}"))?;
-    let node_id = parsed["node_id"]
+    let track_id = parsed["track_id"]
         .as_str()
-        .ok_or("Missing node_id in args")?;
+        .ok_or("Missing track_id in args")?;
     let start_time = parsed["start_time"].as_f64().unwrap_or(0.0);
 
     let session_id = SESSION_ID.with(|cell| cell.borrow().clone())
@@ -118,20 +155,32 @@ fn do_separate(args: &str) -> Result<String, String> {
     let progress_id = dawai::extension::progress::show("Separating stems...", true)
         .unwrap_or_default();
 
-    // 1. Read audio samples from the sampler node
-    let (channels, sample_rate) = dawai::extension::project::get_node_audio(node_id)
+    // 1. Read audio samples from the source track. v0.5 renamed the
+    //    pre-v2 `get-node-audio` to `get-track-audio` — the underlying
+    //    semantics are the same (channels + sample rate of the track's
+    //    audio source).
+    let (channels, sample_rate) = dawai::extension::project::get_track_audio(track_id)
         .map_err(|e| format!("Failed to read audio: {e}"))?;
 
     if channels.is_empty() {
         return Err("No audio channels returned".into());
     }
 
-    let left = &channels[0];
-    let right = if channels.len() > 1 { &channels[1] } else { left };
+    let raw_left = &channels[0];
+    let raw_right = if channels.len() > 1 { &channels[1] } else { raw_left };
 
-    // 2. Resample to 44100 if needed
-    // TODO: use rubato for resampling. For now, assume 44100.
-    let _ = sample_rate;
+    // 2. Resample to MODEL_SAMPLE_RATE so the network sees what it was
+    //    trained on. Owned buffers either way — we hand slices to the
+    //    chunker below.
+    let _ = dawai::extension::progress::update(
+        &progress_id,
+        &format!("Resampling {sample_rate} Hz -> {MODEL_SAMPLE_RATE} Hz"),
+        0.0,
+    );
+    let left_owned = resample(raw_left, sample_rate, MODEL_SAMPLE_RATE)?;
+    let right_owned = resample(raw_right, sample_rate, MODEL_SAMPLE_RATE)?;
+    let left: &[f32] = &left_owned;
+    let right: &[f32] = &right_owned;
 
     // 3. Build chunks with overlap
     let chunks = dsp::build_chunks(left, right, dsp::TRAINING_LENGTH, dsp::OVERLAP);
@@ -222,40 +271,88 @@ fn do_separate(args: &str) -> Result<String, String> {
         }
     }
 
-    // 6. Write stem WAVs and emit document changes
+    // 6. Write stem WAVs and add an audio clip to a fresh track for
+    //    each stem. v0.5 dropped the pre-v2 `add-node("sampler", json)`
+    //    verb — we now add a track (document-track::add-track), then
+    //    attach an audio clip to it (document-clip::add-clip) that
+    //    points at the WAV path.
+    use crate::dawai::extension::document_clip::{add_clip, AddClipPayload};
+    use crate::dawai::extension::document_track::{add_track, AddTrackPayload};
+    use crate::dawai::extension::types::{
+        AudioClip, ClipKind, ColorRgb, TimelinePlacement, TrackKind, TrackSource,
+    };
+
     let stem_names = ["drums", "bass", "vocals", "other"];
-    let storage_path = dawai::extension::storage::get_storage_path()
-        .unwrap_or_else(|_| ".".into());
-    let stems_dir = format!("{storage_path}/stems");
+    let stem_colors = [
+        ColorRgb { r: 220, g: 80,  b: 80  },   // drums  — red
+        ColorRgb { r: 80,  g: 140, b: 220 },   // bass   — blue
+        ColorRgb { r: 220, g: 180, b: 80  },   // vocals — gold
+        ColorRgb { r: 140, g: 200, b: 140 },   // other  — green
+    ];
 
     let _ = dawai::extension::progress::update(&progress_id, "Writing stems...", 0.9);
 
     for (idx, name) in stem_names.iter().enumerate() {
+        // Resample each stem back to the source rate so the WAV plays
+        // in sync with the rest of the project. No-op when source was
+        // already 44.1k (the resample() shortcut handles that).
+        let left_ch = resample(&stem_accum[idx][0], MODEL_SAMPLE_RATE, sample_rate)?;
+        let right_ch = resample(&stem_accum[idx][1], MODEL_SAMPLE_RATE, sample_rate)?;
+        let stem_len = left_ch.len().min(right_ch.len());
+
         // Interleave stereo for WAV
-        let left_ch = &stem_accum[idx][0];
-        let right_ch = &stem_accum[idx][1];
-        let mut interleaved = Vec::with_capacity(total_frames * 2);
-        for j in 0..total_frames {
+        let mut interleaved = Vec::with_capacity(stem_len * 2);
+        for j in 0..stem_len {
             interleaved.push(left_ch[j]);
             interleaved.push(right_ch[j]);
         }
 
         // Encode WAV to bytes
-        let wav_path = format!("{stems_dir}/{name}.wav");
-        let wav_bytes = encode_wav(&interleaved, 44100, 2)
+        let wav_rel = format!("stems/{name}.wav");
+        let wav_bytes = encode_wav(&interleaved, sample_rate, 2)
             .map_err(|e| format!("WAV encode: {e}"))?;
 
-        // Write via binary storage API
-        dawai::extension::storage::write_bytes(&wav_path, &wav_bytes)
+        // Write via binary storage API. Returns the absolute path so we
+        // can point the clip at the real on-disk location.
+        let wav_abs = dawai::extension::storage::write_bytes(&wav_rel, &wav_bytes)
             .map_err(|e| format!("Write stem: {e}"))?;
 
-        // Create sampler node pointing at the stem WAV
-        let params = serde_json::json!({
-            "sample_path": wav_path,
-            "start_time": start_time,
-        });
-        let _node_id = dawai::extension::project::add_node("sampler", &params.to_string())
-            .map_err(|e| format!("Add sampler node: {e}"))?;
+        // Length in beats — approximate from sample count (assume the
+        // host's current tempo is roughly stable; the duration probe
+        // will reconcile when the clip lands). For first cut, leave
+        // length_beats = 0.0 as the "needs-probe" sentinel.
+        let new_track_id = add_track(&AddTrackPayload {
+            name: format!("{} ({name})", "stem"),
+            kind: TrackKind::Audio,
+            source: TrackSource::None,
+            clips: Vec::new(),
+            effects: Vec::new(),
+            sends: Vec::new(),
+            volume: Some(1.0),
+            pan: Some(0.0),
+            muted: Some(false),
+            soloed: Some(false),
+            color: Some(stem_colors[idx]),
+            index: None,
+        })
+        .map_err(|e| format!("Add stem track: {e}"))?;
+
+        let _clip_id = add_clip(&AddClipPayload {
+            track: new_track_id,
+            name: name.to_string(),
+            placement: TimelinePlacement {
+                start_time,
+                length_beats: 0.0,
+            },
+            kind: ClipKind::Audio(AudioClip {
+                sample_path: wav_abs,
+                playback_rate: 1.0,
+                loop_enabled: false,
+                loop_start: 0.0,
+                loop_end: 0.0,
+            }),
+        })
+        .map_err(|e| format!("Add stem clip: {e}"))?;
     }
 
     let _ = dawai::extension::progress::complete(&progress_id, "Stem separation complete");
@@ -404,11 +501,12 @@ impl Guest for DemucsExtension {
             }
 
             ("separate", "clicked") => {
-                // Get the currently selected node
-                let node_id = match dawai::extension::project::get_selected_node_id() {
+                // Get the currently selected track (v0.5 renamed
+                // `get-selected-node-id` to `get-selected-track-id`).
+                let track_id = match dawai::extension::project::get_selected_track_id() {
                     Ok(Some(id)) => id,
                     Ok(None) => {
-                        notify_error("No node selected. Select a sampler node first.");
+                        notify_error("No track selected. Select an audio track first.");
                         return Ok("".into());
                     }
                     Err(e) => {
@@ -417,10 +515,10 @@ impl Guest for DemucsExtension {
                     }
                 };
 
-                notify_info(&format!("Separating node {node_id}..."));
+                notify_info(&format!("Separating track {track_id}..."));
 
                 let args = serde_json::json!({
-                    "node_id": node_id,
+                    "track_id": track_id,
                     "start_time": 0.0,
                 });
                 match do_separate(&args.to_string()) {
