@@ -366,7 +366,7 @@ mod tests {
         let device = Default::default();
         let conv = Conv2dConfig::new([chin, chout], [8, 1])
             .with_stride([4, 1])
-            .with_padding(PaddingConfig2d::Explicit(2, 2, 0, 0))
+            .with_padding(PaddingConfig2d::Explicit(2, 0, 2, 0))
             .init(&device);
         let dconv = make_dconv(chout, 2);
         let rewrite = Conv2dConfig::new([chout, 2 * chout], [1, 1]).init(&device);

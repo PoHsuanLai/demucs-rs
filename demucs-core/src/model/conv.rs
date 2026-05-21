@@ -26,10 +26,14 @@ impl<B: Backend> HEncLayer<B> {
     pub(crate) fn init(chin: usize, chout: usize, device: &B::Device) -> Self {
         let conv = Conv2dConfig::new([chin, chout], [KERNEL_SIZE, 1])
             .with_stride([STRIDE, 1])
+            // burn 0.21 `PaddingConfig2d::Explicit` is (top, left, bottom, right).
+            // The original burn 0.20 form was `Explicit(KERNEL_SIZE/4, 0)` —
+            // symmetric height=KERNEL_SIZE/4, width=0. The correct 0.21
+            // equivalent is `(KERNEL_SIZE/4, 0, KERNEL_SIZE/4, 0)`.
             .with_padding(PaddingConfig2d::Explicit(
                 KERNEL_SIZE / 4,
-                KERNEL_SIZE / 4,
                 0,
+                KERNEL_SIZE / 4,
                 0,
             ))
             .init(device);
@@ -335,7 +339,7 @@ mod tests {
         let device = Default::default();
         let conv = Conv2dConfig::new([chin, chout], [8, 1])
             .with_stride([4, 1])
-            .with_padding(PaddingConfig2d::Explicit(2, 2, 0, 0))
+            .with_padding(PaddingConfig2d::Explicit(2, 0, 2, 0))
             .init(&device);
         let dconv = make_dconv(chout, 2);
         let rewrite = Conv2dConfig::new([chout, 2 * chout], [1, 1]).init(&device);

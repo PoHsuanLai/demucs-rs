@@ -21,7 +21,9 @@ half = "2"
 dirs = "5"
 
 [dev-dependencies]
-burn = { version = "0.21", features = ["ndarray"] }
+# `wgpu` for the `wgpu_smoke` E2E test; `ndarray` for the
+# `stem_sum` test that runs on CPU.
+burn = { version = "0.21", features = ["ndarray", "wgpu"] }
 safetensors = "0.5"
 pollster = "0.4"
 bytemuck = "1"
