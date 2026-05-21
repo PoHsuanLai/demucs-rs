@@ -10,20 +10,32 @@ crate-type = ["cdylib"]
 # WIT bindings
 wit-bindgen = "0.53"
 
-# JSON serialization (for gpu.run tensor I/O and command args)
-serde = { version = "1", features = ["derive"] }
+# burn 0.21 — used through a custom `RouterBackend<WitChannel>` so the
+# extension code is plain burn (Module / forward / Tensor) and the
+# router ships ops to the host over the WIT `burn` interface.
+# `std` is needed for the alloc/thread bits burn-router pulls in; no
+# backend feature — the host is the only backend.
+burn = { version = "0.21", default-features = false, features = ["std"] }
+burn-router = "0.21"
+burn-tensor = "0.21"
+burn-ir = "0.21"
+burn-std = "0.21"
+
+# `OperationIr` blobs serialize with the same wire format as
+# burn-remote so the host can decode them directly.
+rmp-serde = "1"
+
+# Demucs model (Module<B>). Generic over `B: Backend`; we pick
+# `BackendRouter<WitChannel>` at link time.
+demucs-core = { path = "../demucs-core", default-features = false }
+
+# JSON for command args + panel update payloads (panel widget
+# property updates go over the WIT boundary as JSON strings).
 serde_json = "1"
 
-# STFT preprocessing for ONNX path
-rustfft = "6"
-
-# Sample-rate conversion. HTDemucs was trained on 44.1 kHz; resample
-# inputs in, stems out, so non-44.1k sources don't come back pitched.
-# Default features off — they pull in `fft_resampler` which needs
-# `realfft` and isn't needed for the sinc path.
-rubato = { version = "0.16", default-features = false }
-
-# WAV writing for stem output
+# WAV writing for stem output. demucs-core handles resampling
+# internally (`realfft` is in its own dep tree), so we no longer
+# need rubato/rustfft here.
 hound = "3.5"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]

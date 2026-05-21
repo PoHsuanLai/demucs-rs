@@ -7,6 +7,11 @@ extension_type = "wasm"
 main = "extension.wasm"
 tags = ["ai", "audio", "stems"]
 
+# Burn ABI pin — the .wasm component links burn 0.21's `OperationIr`
+# serialization. Host rejects activation if it links a different
+# version because the wire format is unstable across burn releases.
+requires-burn-abi = "0.21"
+
 [permissions]
 network = true
 storage = true

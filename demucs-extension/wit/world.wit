@@ -10,7 +10,7 @@
 // `node-network`) are gone — extensions emit `track-change` /
 // `bus-change` / `master-change` directly.
 
-package dawai:extension@0.7.0;
+package dawai:extension@0.8.0;
 
 /// Common types used across all interfaces
 interface types {
@@ -543,19 +543,25 @@ interface ui {
     show-error: func(title: string, message: string) -> result<string, string>;
 
     /// Single-input prompt. Returns the user's entered text, or
-    /// `Err("cancelled")` if dismissed.
+    /// `Err("cancelled")` if the user dismissed the dialog. `default`
+    /// pre-fills the input box.
     show-input: func(title: string, default: string) -> result<string, string>;
 
-    /// Yes/no prompt.
+    /// Yes/no prompt. Returns `true` for the affirmative button,
+    /// `false` for the negative. `Err("cancelled")` if dismissed.
     show-confirm: func(title: string, message: string) -> result<bool, string>;
 
-    /// Pick-from-list prompt. Returns the 0-based index.
+    /// Pick-from-list prompt. Returns the 0-based index of the chosen
+    /// option, or `Err("cancelled")` if dismissed.
     show-select: func(title: string, options: list<string>) -> result<u32, string>;
 
     /// Free-form modal described by `spec-json` — a JSON-encoded
     /// `ModalSpec` with `title`, `fields`, and `buttons`. Returns a
     /// JSON-encoded `ModalAnswer` with `values` (keyed by field id)
-    /// and `button` (the clicked button's value).
+    /// and `button` (the clicked button's value). Use this when the
+    /// typed `show-input` / `show-confirm` / `show-select` verbs above
+    /// can't express the dialog you need (multi-field forms, custom
+    /// button labels with mixed semantics, etc).
     show-modal: func(spec-json: string) -> result<string, string>;
 }
 
@@ -759,27 +765,73 @@ interface document-read {
     is-playing: func() -> bool;
 }
 
-/// GPU inference — load ONNX models and run inference on the host.
+/// Host-owned ML execution backend (burn router transport).
 ///
-/// Models live on disk under the extension's sandboxed storage root
-/// (see the `storage` interface). To load a model that arrived over
-/// the network, write it via `storage.download-file` first, then pass
-/// the relative path here.
-interface gpu {
-    /// Load an ONNX model from a file path under the extension's
-    /// storage root. Same sandbox rules as `storage::*` — relative
-    /// path, no `..`, resolved against the storage dir. Returns a
-    /// session handle good until `unload-model` or component teardown.
-    load-model: func(path: string) -> result<string, string>;
+/// Extensions write idiomatic burn code with a `RouterBackend<WitChannel>`;
+/// `WitChannel` calls into this interface to ship `OperationIr` blobs
+/// to the host, which dispatches them on its own burn-wgpu runner.
+///
+/// The shape mirrors `burn-router::RunnerClient` — the trait burn's
+/// own authors designed for "execute ops in another process." See
+/// `burn-remote` (TCP transport) for the same shape over a different
+/// wire. Per-op crossings are cheap because burn batches op
+/// submission and only flushes on `sync` / `read-tensor`.
+///
+/// Wire format: `op-bytes` is `OperationIr` serialized via `rmp_serde`.
+/// `dtype` matches `burn_tensor::DType`'s `repr(u8)` encoding.
+interface burn {
+    /// Tensor data crossing the boundary. `dtype` is a `DType` discriminant;
+    /// `shape` is row-major dims; `bytes` is the raw tensor blob.
+    record tensor-data {
+        dtype: u8,
+        shape: list<u32>,
+        bytes: list<u8>,
+    }
 
-    /// Drop a session and free its ORT resources.
-    unload-model: func(session-id: string) -> result<string, string>;
+    /// Burn device descriptor — guests use this to seed their local
+    /// `Backend::Device` so `Tensor::from_data(data, &device)` lines
+    /// up with the host's runner.
+    record device-info {
+        id: u32,
+        kind: string,
+    }
 
-    /// Run inference. Inputs/outputs are named tensors as JSON:
-    /// `{ "input_name": { "shape": [1, 2, 343980], "data": [...] } }`.
-    /// Outputs come back keyed as `"output_0"`, `"output_1"`, … in
-    /// declaration order.
-    run: func(session-id: string, inputs-json: string) -> result<string, string>;
+    /// Register a tensor op (fire-and-forget). Burn batches op
+    /// submission; pending ops execute on `sync` or implicitly when
+    /// `read-tensor` is called on a downstream result. The output
+    /// tensor ids are encoded in the `OperationIr` blob itself —
+    /// no return value needed.
+    register-op: func(op-bytes: list<u8>) -> result<_, string>;
+
+    /// Move a tensor blob from guest memory into the host runner at
+    /// the guest-issued id. Follows the same pattern as `burn-remote`:
+    /// the guest owns the id allocator (an atomic counter) so it can
+    /// build `OperationIr` blobs without round-tripping.
+    register-tensor-data: func(id: u64, data: tensor-data) -> result<_, string>;
+
+    /// Read a tensor's data back across the boundary. The guest
+    /// supplies the id, shape, and dtype it remembers from when the
+    /// id was created. Blocks until the runner finishes any pending
+    /// ops the tensor depends on.
+    read-tensor: func(id: u64, shape: list<u32>, dtype: u8) -> result<tensor-data, string>;
+
+    /// Flush the runner — wait for every queued op to complete.
+    sync: func() -> result<_, string>;
+
+    /// Query the runner's device. Guests use this to construct a
+    /// matching local `Backend::Device`.
+    device: func() -> device-info;
+
+    /// Seed the runner's RNG.
+    seed: func(value: u64);
+
+    /// Query which usage classes the runner supports for a given dtype.
+    /// Returns a bitmask over `burn_tensor::backend::DTypeUsage`:
+    /// bit 0 = Storage, bit 1 = Arithmetic, bit 2 = Accelerated.
+    /// Mirrors `EnumSet<DTypeUsage>::as_u32()` — guests forward the
+    /// answer through their `RunnerClient::dtype_usage` so
+    /// burn-router can pick a backend-compatible code path.
+    dtype-usage: func(dtype: u8) -> u32;
 }
 
 /// Main world - defines what extensions import and export
@@ -793,7 +845,7 @@ world dawai-extension {
     import ui;
     import progress;
     import panel-ui;
-    import gpu;
+    import burn;
     import document-track;
     import document-bus;
     import document-master;
