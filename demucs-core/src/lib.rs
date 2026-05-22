@@ -192,9 +192,18 @@ impl<B: Backend> Demucs<B> {
         left_padded[..n_samples].copy_from_slice(left_channel);
         right_padded[..n_samples].copy_from_slice(right_channel);
 
+        // NOTE: in-tree there's a GPU-resident STFT in `dsp::stft_tensor`
+        // that compiles + numerically matches (see its unit tests).
+        // We can't use it on the WIT-routed Backend yet because
+        // `burn-router` 0.21 stubs `rfft`/`irfft` as `todo!()` — the
+        // OperationIr variants exist (`burn_ir::RfftOpIr`,
+        // `IRfftOpIr`) but the router doesn't relay them. When that
+        // lands upstream (or we patch it locally), swap to
+        // `stft_tensor::spec_cac` / `ispec_cac` and the in-GPU extract
+        // path that the test module documents.
         let mut stft = Stft::new(N_FFT, HOP_LENGTH);
 
-        // STFT both channels
+        // STFT both channels on CPU
         let left_spec = stft.forward(&left_padded)?;
         let right_spec = stft.forward(&right_padded)?;
         let bins = N_FFT / 2;
