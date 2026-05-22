@@ -22,6 +22,7 @@ use std::cell::RefCell;
 
 use exports::dawai::extension::extension::Guest;
 
+use burn::tensor::{Tensor, TensorData};
 use burn_std::future::block_on;
 use demucs_core::{Demucs, ModelOptions};
 
@@ -231,6 +232,29 @@ fn do_separate(args: &str) -> Result<String, String> {
     Ok(format!("Separated into {n_stems} stems"))
 }
 
+/// Minimal end-to-end exercise of the WIT `burn` interface: builds a
+/// 3-element f32 tensor through the router, runs one op (`add_scalar`),
+/// reads it back, and returns the result as JSON.
+///
+/// Used by the testkit smoke test to verify that
+/// `register-tensor-data` / `register-op` / `read-tensor` all
+/// round-trip through the host runner without involving the rest of
+/// demucs. If this fails, no point trying the full separation path.
+fn do_burn_smoke(_args: &str) -> Result<String, String> {
+    let device = WitDevice::default();
+    let input = TensorData::new(vec![1.0f32, 2.0, 3.0], [3]);
+    let t: Tensor<Backend, 1> = Tensor::from_data(input, &device);
+    let out = t.add_scalar(1.0);
+    let data = block_on(out.into_data_async())
+        .map_err(|e| format!("read tensor: {e}"))?;
+    let bytes = data.into_bytes().to_vec();
+    let floats: Vec<f32> = bytes
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect();
+    serde_json::to_string(&floats).map_err(|e| format!("serialize burn_smoke: {e}"))
+}
+
 fn encode_wav(samples: &[f32], sample_rate: u32, channels: u16) -> Result<Vec<u8>, String> {
     let mut buf = Vec::new();
     let cursor = std::io::Cursor::new(&mut buf);
@@ -305,6 +329,7 @@ impl Guest for DemucsExtension {
             "demucs.download" => do_download_model(),
             "demucs.load" => do_load(&args),
             "demucs.separate" => do_separate(&args),
+            "demucs.burn_smoke" => do_burn_smoke(&args),
             _ => Err(format!("Unknown command: {command_id}")),
         }
     }

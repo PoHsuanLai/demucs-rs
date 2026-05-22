@@ -29,6 +29,14 @@ title = "Load HTDemucs Model"
 id = "demucs.separate"
 title = "Separate Stems"
 
+# Test-only: round-trips a 3-element tensor through the WIT `burn`
+# interface (`Tensor::from_data` → `add_scalar` → `into_data`). The
+# dawai-extension-testkit smoke test calls this to verify the
+# router transport without needing the full HTDemucs model.
+[[contributes.commands]]
+id = "demucs.burn_smoke"
+title = "Burn Router Smoke Test"
+
 [[contributes.panels]]
 id = "dawai.demucs"
 name = "Demucs Source Separation"
