@@ -37,6 +37,13 @@ title = "Separate Stems"
 id = "demucs.burn_smoke"
 title = "Burn Router Smoke Test"
 
+# Test-only: full Demucs::separate on a short synthetic stereo signal
+# through the WIT `burn` interface. Requires cached weights staged
+# into the extension's storage dir.
+[[contributes.commands]]
+id = "demucs.full_smoke"
+title = "Demucs Full E2E Smoke Test"
+
 [[contributes.panels]]
 id = "dawai.demucs"
 name = "Demucs Source Separation"

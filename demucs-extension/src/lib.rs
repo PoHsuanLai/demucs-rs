@@ -232,6 +232,88 @@ fn do_separate(args: &str) -> Result<String, String> {
     Ok(format!("Separated into {n_stems} stems"))
 }
 
+/// Full E2E smoke: loads the cached safetensors from storage,
+/// instantiates `Demucs::<Backend>`, runs `separate()` on a short
+/// synthetic stereo signal, and returns a JSON digest the testkit
+/// asserts on. This exercises every op the model emits — conv2d,
+/// gelu, layernorm, STFT, complex matmul, etc. — all routed through
+/// the WIT bridge to the host's wgpu runner.
+///
+/// Args: `{"seconds": f32 (optional, default 1.0)}` — keep small,
+/// each second is ~1-3 s of wall time on a fast Mac through the
+/// router.
+fn do_full_smoke(args: &str) -> Result<String, String> {
+    let parsed: serde_json::Value = if args.trim().is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::from_str(args).map_err(|e| format!("parse args: {e}"))?
+    };
+    let seconds = parsed
+        .get("seconds")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(1.0) as f32;
+
+    let bytes = if let Some(b) = MODEL_BYTES.with(|cell| cell.borrow().clone()) {
+        b
+    } else {
+        if !model_exists() {
+            return Err("Model file not found in storage. Stage it before calling full_smoke.".into());
+        }
+        let b = dawai::extension::storage::read_bytes(MODEL_PATH)
+            .map_err(|e| format!("read model bytes: {e}"))?;
+        MODEL_BYTES.with(|cell| *cell.borrow_mut() = Some(b.clone()));
+        b
+    };
+
+    let sr: u32 = 44_100;
+    let n = (seconds * sr as f32) as usize;
+    let dt = 1.0 / sr as f32;
+    let mut left = Vec::with_capacity(n);
+    let mut right = Vec::with_capacity(n);
+    for i in 0..n {
+        let t = i as f32 * dt;
+        let bass = (2.0 * std::f32::consts::PI * 110.0 * t).sin() * 0.3;
+        let lead = (2.0 * std::f32::consts::PI * 440.0 * t).sin() * 0.2;
+        let drum_env = (-((t % 0.5) * 30.0)).exp();
+        let drum = (2.0 * std::f32::consts::PI * 60.0 * t).sin() * drum_env * 0.25;
+        let mono = bass + lead + drum;
+        left.push(mono);
+        right.push(mono * 0.95);
+    }
+
+    let device = WitDevice::default();
+    let demucs = Demucs::<Backend>::from_bytes(ModelOptions::FourStem, &bytes, device)
+        .map_err(|e| format!("decode model: {e}"))?;
+
+    let stems = block_on(demucs.separate(&left, &right, sr))
+        .map_err(|e| format!("separate: {e}"))?;
+
+    let mut digest = Vec::with_capacity(stems.len());
+    let mut all_finite = true;
+    for stem in &stems {
+        let max_l = stem.left.iter().copied().fold(0.0f32, f32::max);
+        let max_r = stem.right.iter().copied().fold(0.0f32, f32::max);
+        if !stem.left.iter().all(|x| x.is_finite()) || !stem.right.iter().all(|x| x.is_finite()) {
+            all_finite = false;
+        }
+        digest.push(serde_json::json!({
+            "len_left": stem.left.len(),
+            "len_right": stem.right.len(),
+            "max_left": max_l,
+            "max_right": max_r,
+        }));
+    }
+
+    let out = serde_json::json!({
+        "stem_count": stems.len(),
+        "input_samples": n,
+        "sample_rate": sr,
+        "all_finite": all_finite,
+        "stems": digest,
+    });
+    serde_json::to_string(&out).map_err(|e| format!("serialize digest: {e}"))
+}
+
 /// Minimal end-to-end exercise of the WIT `burn` interface: builds a
 /// 3-element f32 tensor through the router, runs one op (`add_scalar`),
 /// reads it back, and returns the result as JSON.
@@ -330,6 +412,7 @@ impl Guest for DemucsExtension {
             "demucs.load" => do_load(&args),
             "demucs.separate" => do_separate(&args),
             "demucs.burn_smoke" => do_burn_smoke(&args),
+            "demucs.full_smoke" => do_full_smoke(&args),
             _ => Err(format!("Unknown command: {command_id}")),
         }
     }
