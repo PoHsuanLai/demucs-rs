@@ -834,6 +834,78 @@ interface burn {
     dtype-usage: func(dtype: u8) -> u32;
 }
 
+/// Model registry — declarative model asset acquisition.
+///
+/// Extensions reference model assets by id; the id has to be declared
+/// up-front in the extension's manifest:
+///
+/// ```toml
+/// [[contributes.models]]
+/// id        = "htdemucs-4stem"
+/// url       = "https://github.com/.../htdemucs.safetensors"
+/// sha256    = "e1234..."
+/// size      = 84030696
+/// format    = "safetensors"   # informational; opaque to host
+/// filename  = "htdemucs.safetensors"  # name surfaced to guest
+/// ```
+///
+/// `fetch` returns a path inside the extension's sandboxed storage
+/// that points at the verified asset — the 80 MB blob never crosses
+/// WIT. Bytes are content-addressed in a shared blob store
+/// (`<data-root>/models/blobs/<sha256>`) with per-extension hardlinks
+/// (copy fallback on filesystems without hardlinks), so two extensions
+/// pinning the same sha256 share one disk copy.
+///
+/// Integrity contract: the host streams downloads to `<blob>.part`,
+/// hashes as it writes, and atomically renames only on a sha-match.
+/// A mismatch deletes the partial file and returns `integrity-failed`.
+/// Re-fetches after a successful download are no-op (blob exists,
+/// hardlink already in place).
+interface models {
+    /// Handle returned on a successful fetch. `path` is rooted in the
+    /// extension's preopen storage dir — pass it to `storage.read-bytes`
+    /// or any wasip1 fs op.
+    record asset-handle {
+        path: string,
+        size: u64,
+        sha256: string,
+    }
+
+    /// Structured error so guests can branch on the failure mode
+    /// (e.g. retry the download but surface a hard error on integrity
+    /// failure).
+    variant fetch-error {
+        /// model-id is not declared in the extension's manifest
+        not-declared(string),
+        /// network/HTTP error after retries
+        download-failed(string),
+        /// computed sha256 didn't match the manifest pin
+        integrity-failed(string),
+        /// host filesystem error (cache dir, hardlink, …)
+        io-error(string),
+        /// declared `format` is one the host doesn't recognise
+        unsupported(string),
+    }
+
+    /// Block until the model is fetched, verified, and visible at
+    /// `asset-handle.path`. For large downloads, prefer `fetch-async`
+    /// so the guest can pump `progress::*` for UI updates.
+    fetch: func(model-id: string) -> result<asset-handle, fetch-error>;
+
+    /// Kick off a background fetch. Returns a handle the guest polls
+    /// with `poll-fetch`. The host emits `progress::*` updates against
+    /// a guest-supplied progress handle (caller passes its id through
+    /// the existing progress channel before starting the fetch — there
+    /// is no separate progress channel here, deliberately).
+    fetch-async: func(model-id: string) -> result<u32, fetch-error>;
+
+    /// Poll an in-flight fetch. `Ok(none)` means still running;
+    /// `Ok(some(handle))` means complete and ready to use;
+    /// `Err(...)` means terminal failure (and the handle is consumed
+    /// — don't poll again).
+    poll-fetch: func(handle: u32) -> result<option<asset-handle>, fetch-error>;
+}
+
 /// Main world - defines what extensions import and export
 world dawai-extension {
     // Host APIs (imported by extension)
@@ -846,6 +918,7 @@ world dawai-extension {
     import progress;
     import panel-ui;
     import burn;
+    import models;
     import document-track;
     import document-bus;
     import document-master;
